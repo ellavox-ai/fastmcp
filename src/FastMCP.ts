@@ -990,6 +990,7 @@ export class FastMCPSession<
   #capabilities: ServerCapabilities = {};
   #clientCapabilities?: ClientCapabilities;
   #connectionState: "closed" | "connecting" | "error" | "ready" = "connecting";
+  #httpHeaders?: Record<string, string>;
   #logger: Logger;
   #loggingLevel: LoggingLevel = "info";
   #needsEventLoopFlush: boolean = false;
@@ -1014,6 +1015,7 @@ export class FastMCPSession<
 
   constructor({
     auth,
+    httpHeaders,
     instructions,
     logger,
     name,
@@ -1029,6 +1031,7 @@ export class FastMCPSession<
     version,
   }: {
     auth?: T;
+    httpHeaders?: Record<string, string>;
     instructions?: string;
     logger: Logger;
     name: string;
@@ -1046,6 +1049,7 @@ export class FastMCPSession<
     super();
 
     this.#auth = auth;
+    this.#httpHeaders = httpHeaders;
     this.#logger = logger;
     this.#pingConfig = ping;
     this.#rootsConfig = roots;
@@ -1710,7 +1714,7 @@ export class FastMCPSession<
           try {
             const context: ToolFilterContext = {
               body: request.params,
-              headers: (extra?._meta?.headers as Record<string, string>) || {},
+              headers: this.#httpHeaders || {},
               meta: extra?._meta,
               method: (request.method as string) || "POST",
               path: (extra?._meta?.path as string) || "/mcp",
@@ -2170,6 +2174,7 @@ export class FastMCP<
 
       const session = new FastMCPSession<T>({
         auth,
+        httpHeaders: undefined, // No HTTP headers for stdio transport
         instructions: this.#options.instructions,
         logger: this.#logger,
         name: this.#options.name,
@@ -2230,9 +2235,21 @@ export class FastMCP<
               auth = await this.#authenticate(request);
             }
 
+            // Extract HTTP headers for tool filtering
+            const httpHeaders: Record<string, string> = {};
+            if (request?.headers) {
+              for (const [key, value] of Object.entries(request.headers)) {
+                if (typeof value === 'string') {
+                  httpHeaders[key.toLowerCase()] = value;
+                } else if (Array.isArray(value)) {
+                  httpHeaders[key.toLowerCase()] = value.join(', ');
+                }
+              }
+            }
+
             // In stateless mode, create a new session for each request
             // without persisting it in the sessions array
-            return this.#createSession(auth);
+            return this.#createSession(auth, httpHeaders);
           },
           enableJsonResponse: httpConfig.enableJsonResponse,
           eventStore: httpConfig.eventStore,
@@ -2264,7 +2281,19 @@ export class FastMCP<
               auth = await this.#authenticate(request);
             }
 
-            return this.#createSession(auth);
+            // Extract HTTP headers for tool filtering
+            const httpHeaders: Record<string, string> = {};
+            if (request?.headers) {
+              for (const [key, value] of Object.entries(request.headers)) {
+                if (typeof value === 'string') {
+                  httpHeaders[key.toLowerCase()] = value;
+                } else if (Array.isArray(value)) {
+                  httpHeaders[key.toLowerCase()] = value.join(', ');
+                }
+              }
+            }
+
+            return this.#createSession(auth, httpHeaders);
           },
           enableJsonResponse: httpConfig.enableJsonResponse,
           eventStore: httpConfig.eventStore,
@@ -2322,7 +2351,7 @@ export class FastMCP<
    * Creates a new FastMCPSession instance with the current configuration.
    * Used both for regular sessions and stateless requests.
    */
-  #createSession(auth?: T): FastMCPSession<T> {
+  #createSession(auth?: T, httpHeaders?: Record<string, string>): FastMCPSession<T> {
     const allowedTools = auth
       ? this.#tools.filter((tool) =>
           tool.canAccess ? tool.canAccess(auth) : true,
@@ -2330,6 +2359,7 @@ export class FastMCP<
       : this.#tools;
     return new FastMCPSession<T>({
       auth,
+      httpHeaders,
       instructions: this.#options.instructions,
       logger: this.#logger,
       name: this.#options.name,
