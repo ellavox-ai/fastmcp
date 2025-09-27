@@ -2239,10 +2239,10 @@ export class FastMCP<
             const httpHeaders: Record<string, string> = {};
             if (request?.headers) {
               for (const [key, value] of Object.entries(request.headers)) {
-                if (typeof value === 'string') {
+                if (typeof value === "string") {
                   httpHeaders[key.toLowerCase()] = value;
                 } else if (Array.isArray(value)) {
-                  httpHeaders[key.toLowerCase()] = value.join(', ');
+                  httpHeaders[key.toLowerCase()] = value.join(", ");
                 }
               }
             }
@@ -2285,10 +2285,10 @@ export class FastMCP<
             const httpHeaders: Record<string, string> = {};
             if (request?.headers) {
               for (const [key, value] of Object.entries(request.headers)) {
-                if (typeof value === 'string') {
+                if (typeof value === "string") {
                   httpHeaders[key.toLowerCase()] = value;
                 } else if (Array.isArray(value)) {
-                  httpHeaders[key.toLowerCase()] = value.join(', ');
+                  httpHeaders[key.toLowerCase()] = value.join(", ");
                 }
               }
             }
@@ -2351,7 +2351,10 @@ export class FastMCP<
    * Creates a new FastMCPSession instance with the current configuration.
    * Used both for regular sessions and stateless requests.
    */
-  #createSession(auth?: T, httpHeaders?: Record<string, string>): FastMCPSession<T> {
+  #createSession(
+    auth?: T,
+    httpHeaders?: Record<string, string>,
+  ): FastMCPSession<T> {
     const allowedTools = auth
       ? this.#tools.filter((tool) =>
           tool.canAccess ? tool.canAccess(auth) : true,
