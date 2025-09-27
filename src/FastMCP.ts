@@ -1228,34 +1228,68 @@ export class FastMCPSession<
    */
   public getCurrentHeaders(extra?: unknown): Record<string, string> {
     // Type guard to safely access properties on unknown type
+    if (!extra || typeof extra !== "object") {
+      console.log("🔍 Using session headers as fallback - no extra object");
+      return this.#httpHeaders || {};
+    }
+
     const extraObj = extra as Record<string, unknown>;
 
+    // Check extra.requestInfo.headers
+    if (extraObj.requestInfo && typeof extraObj.requestInfo === "object") {
+      const requestInfo = extraObj.requestInfo as Record<string, unknown>;
+      if (
+        requestInfo.headers &&
+        typeof requestInfo.headers === "object" &&
+        requestInfo.headers !== null
+      ) {
+        console.log(
+          "🔍 Using current request headers from extra.requestInfo.headers",
+        );
+        return requestInfo.headers as Record<string, string>;
+      }
+    }
+
+    // Check extra._meta.headers
+    if (extraObj._meta && typeof extraObj._meta === "object") {
+      const meta = extraObj._meta as Record<string, unknown>;
+      if (
+        meta.headers &&
+        typeof meta.headers === "object" &&
+        meta.headers !== null
+      ) {
+        console.log(
+          "🔍 Using current request headers from extra._meta.headers",
+        );
+        return meta.headers as Record<string, string>;
+      }
+    }
+
+    // Check extra.headers
     if (
-      extraObj?.requestInfo?.headers &&
-      typeof extraObj.requestInfo.headers === "object"
+      extraObj.headers &&
+      typeof extraObj.headers === "object" &&
+      extraObj.headers !== null
     ) {
-      console.log(
-        "🔍 Using current request headers from extra.requestInfo.headers",
-      );
-      return extraObj.requestInfo.headers as Record<string, string>;
-    } else if (
-      extraObj?._meta?.headers &&
-      typeof extraObj._meta.headers === "object"
-    ) {
-      console.log("🔍 Using current request headers from extra._meta.headers");
-      return extraObj._meta.headers as Record<string, string>;
-    } else if (extraObj?.headers && typeof extraObj.headers === "object") {
       console.log("🔍 Using current request headers from extra.headers");
       return extraObj.headers as Record<string, string>;
-    } else if (
-      extraObj?.request?.headers &&
-      typeof extraObj.request.headers === "object"
-    ) {
-      console.log(
-        "🔍 Using current request headers from extra.request.headers",
-      );
-      return extraObj.request.headers as Record<string, string>;
     }
+
+    // Check extra.request.headers
+    if (extraObj.request && typeof extraObj.request === "object") {
+      const request = extraObj.request as Record<string, unknown>;
+      if (
+        request.headers &&
+        typeof request.headers === "object" &&
+        request.headers !== null
+      ) {
+        console.log(
+          "🔍 Using current request headers from extra.request.headers",
+        );
+        return request.headers as Record<string, string>;
+      }
+    }
+
     console.log("🔍 Using session headers as fallback");
     return this.#httpHeaders || {};
   }
