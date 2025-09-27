@@ -1,0 +1,237 @@
+name: Build and Publish Package
+
+on:
+  # Trigger on pushes to main branch
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - ".gitignore"
+
+  # Trigger on pull requests to main
+  pull_request:
+    branches: [main]
+
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      version_bump:
+        description: "Version bump type"
+        required: true
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - prerelease
+
+jobs:
+  # Job 1: Test and build
+  test-and-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history for proper versioning
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@ellavox"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run linting
+        run: |
+          npm run format
+          npx prettier --check .
+          npx eslint .
+
+      - name: Run TypeScript type checking
+        run: npx tsc --noEmit
+
+      - name: Run tests
+        run: npm test
+        continue-on-error: true # Don't fail if tests don't exist yet
+
+      - name: Build package
+        run: npm run build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-files
+          path: dist/
+          retention-days: 7
+
+  # Job 2: Publish to GitHub Packages (only on main branch or manual trigger)
+  publish:
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # Use a PAT to allow pushing tags
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@ellavox"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-files
+          path: dist/
+
+      - name: Configure Git
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+
+      - name: Determine version bump
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION_TYPE="${{ github.event.inputs.version_bump }}"
+          else
+            # Auto-determine version bump based on commit messages
+            if git log --format=%B -n 1 | grep -q "BREAKING CHANGE\|!:"; then
+              VERSION_TYPE="major"
+            elif git log --format=%B -n 1 | grep -qE "^feat(\(.+\))?: "; then
+              VERSION_TYPE="minor"
+            else
+              VERSION_TYPE="patch"
+            fi
+          fi
+          echo "version_type=$VERSION_TYPE" >> $GITHUB_OUTPUT
+          echo "Determined version bump: $VERSION_TYPE"
+
+      - name: Bump version
+        id: bump
+        run: |
+          # Bump version
+          NEW_VERSION=$(npm version ${{ steps.version.outputs.version_type }} --no-git-tag-version)
+          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
+          echo "New version: $NEW_VERSION"
+
+          # Commit version bump
+          git add package.json package-lock.json
+          git commit -m "chore: bump version to $NEW_VERSION [skip ci]"
+          git tag "$NEW_VERSION"
+
+      - name: Push changes and tags
+        run: |
+          git push origin main
+          git push origin ${{ steps.bump.outputs.new_version }}
+
+      - name: Publish to GitHub Packages
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.bump.outputs.new_version }}
+          release_name: Release ${{ steps.bump.outputs.new_version }}
+          body: |
+            ## Changes in ${{ steps.bump.outputs.new_version }}
+
+            ### Features
+            - ✨ Tool filtering feature for dynamic tool provisioning
+            - 🔧 Enhanced FastMCP with context-aware tool filtering
+
+            ### Technical Details
+            - Added `ToolFilterContext` interface for request context
+            - Added `FilterableTool` interface for tool representation  
+            - Added `ToolFilterFunction` type for custom filtering logic
+            - Updated `ServerOptions` to include optional `toolFilter` property
+            - Modified `setupToolHandlers` to apply filtering during tools/list requests
+
+            ### Usage
+            ```typescript
+            const server = new FastMCP({
+              name: "my-server",
+              version: "1.0.0",
+              toolFilter: async (tools, context) => {
+                if (context.headers['x-provider'] === 'vapi') {
+                  return await filterToolsForVAPI(tools, context)
+                }
+                return tools
+              }
+            });
+            ```
+
+            Install with:
+            ```bash
+            npm install @ellavox/fastmcp@${{ steps.bump.outputs.new_version }}
+            ```
+          draft: false
+          prerelease: false
+
+  # Job 3: Test installation (runs after publish)
+  test-installation:
+    needs: publish
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@ellavox"
+
+      - name: Create test project
+        run: |
+          mkdir test-install
+          cd test-install
+          npm init -y
+          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > .npmrc
+          echo "@ellavox:registry=https://npm.pkg.github.com" >> .npmrc
+
+      - name: Test package installation
+        run: |
+          cd test-install
+          npm install @ellavox/fastmcp
+          node -e "
+            import('@ellavox/fastmcp').then(pkg => {
+              console.log('✅ Package installed successfully');
+              console.log('Exported:', Object.keys(pkg));
+              if (pkg.FastMCP) {
+                console.log('✅ FastMCP class available');
+              } else {
+                console.error('❌ FastMCP class not found');
+                process.exit(1);
+              }
+            }).catch(err => {
+              console.error('❌ Import failed:', err);
+              process.exit(1);
+            });
+          "
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

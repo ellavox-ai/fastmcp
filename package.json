@@ -1,12 +1,18 @@
 {
-  "name": "fastmcp",
-  "version": "1.0.0",
+  "name": "@ellavox/fastmcp",
+  "version": "1.0.1",
   "main": "dist/FastMCP.js",
   "scripts": {
     "build": "tsup",
-    "lint": "prettier --check . && eslint . && tsc --noEmit && jsr publish --dry-run",
+    "lint": "prettier --check . && eslint . && tsc --noEmit",
+    "lint:fix": "prettier --write . && eslint --fix .",
     "test": "vitest run",
-    "format": "prettier --write . && eslint --fix ."
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
+    "release:patch": "npm version patch && git push && git push --tags",
+    "release:minor": "npm version minor && git push && git push --tags",
+    "release:major": "npm version major && git push && git push --tags"
   },
   "bin": {
     "fastmcp": "dist/bin/fastmcp.js"
@@ -37,9 +43,12 @@
     "zod-to-json-schema": "^3.24.6"
   },
   "repository": {
-    "url": "https://github.com/punkpeye/fastmcp"
+    "type": "git",
+    "url": "git+https://github.com/ellavox/fastmcp.git"
   },
-  "homepage": "https://glama.ai/mcp",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "release": {
     "branches": [
       "main"

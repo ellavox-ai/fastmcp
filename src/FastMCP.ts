@@ -38,6 +38,19 @@ import parseURITemplate from "uri-templates";
 import { toJsonSchema } from "xsschema";
 import { z } from "zod";
 
+export interface FilterableTool {
+  /** Optional tool annotations */
+  annotations?: unknown;
+  /** Tool description */
+  description: string;
+  /** JSON schema for tool input parameters */
+  inputSchema: unknown;
+  /** Tool name */
+  name: string;
+}
+
+export type FilterableToolList = FilterableTool[];
+
 export interface Logger {
   debug(...args: unknown[]): void;
   error(...args: unknown[]): void;
@@ -49,6 +62,24 @@ export interface Logger {
 export type SSEServer = {
   close: () => Promise<void>;
 };
+
+export interface ToolFilterContext {
+  /** MCP request body/parameters */
+  body?: unknown;
+  /** Request headers from the MCP client */
+  headers: Record<string, string>;
+  /** Optional: MCP request metadata */
+  meta?: unknown;
+  /** HTTP method (usually POST for MCP) */
+  method: string;
+  /** Request path (usually /mcp) */
+  path: string;
+}
+
+export type ToolFilterFunction = (
+  tools: FilterableToolList,
+  context: ToolFilterContext,
+) => FilterableToolList | Promise<FilterableToolList>;
 
 type FastMCPEvents<T extends FastMCPSessionAuth> = {
   connect: (event: { session: FastMCPSession<T> }) => void;
@@ -829,6 +860,25 @@ type ServerOptions<T extends FastMCPSessionAuth> = {
     enabled?: boolean;
   };
   /**
+   * Optional tool filter function for dynamic tool provisioning.
+   * Called during tools/list requests to filter available tools based on request context.
+   *
+   * @param tools - List of all registered tools
+   * @param context - Request context (headers, method, path, body)
+   * @returns Filtered list of tools to return to the client
+   *
+   * @example
+   * ```typescript
+   * toolFilter: async (tools, context) => {
+   *   if (context.headers['x-provider'] === 'vapi') {
+   *     return await filterToolsForVAPI(tools, context)
+   *   }
+   *   return tools // Return all tools for other providers
+   * }
+   * ```
+   */
+  toolFilter?: ToolFilterFunction;
+  /**
    * General utilities
    */
   utils?: {
@@ -958,6 +1008,7 @@ export class FastMCPSession<
   #rootsConfig?: ServerOptions<T>["roots"];
 
   #server: Server;
+  #toolFilter?: ToolFilterFunction;
 
   #utils?: ServerOptions<T>["utils"];
 
@@ -971,6 +1022,7 @@ export class FastMCPSession<
     resources,
     resourcesTemplates,
     roots,
+    toolFilter,
     tools,
     transportType,
     utils,
@@ -985,6 +1037,7 @@ export class FastMCPSession<
     resources: Resource<T>[];
     resourcesTemplates: InputResourceTemplate<T>[];
     roots?: ServerOptions<T>["roots"];
+    toolFilter?: ToolFilterFunction;
     tools: Tool<T>[];
     transportType?: "httpStream" | "stdio";
     utils?: ServerOptions<T>["utils"];
@@ -996,6 +1049,7 @@ export class FastMCPSession<
     this.#logger = logger;
     this.#pingConfig = ping;
     this.#rootsConfig = roots;
+    this.#toolFilter = toolFilter;
     this.#needsEventLoopFlush = transportType === "httpStream";
 
     if (tools.length) {
@@ -1630,26 +1684,65 @@ export class FastMCPSession<
   }
 
   private setupToolHandlers(tools: Tool<T>[]) {
-    this.#server.setRequestHandler(ListToolsRequestSchema, async () => {
-      return {
-        tools: await Promise.all(
-          tools.map(async (tool) => {
+    this.#server.setRequestHandler(
+      ListToolsRequestSchema,
+      async (request, extra) => {
+        // Convert internal tools to filterable format
+        let toolList: FilterableToolList = await Promise.all(
+          tools.map(async (tool): Promise<FilterableTool> => {
             return {
               annotations: tool.annotations,
-              description: tool.description,
+              description: tool.description || "",
               inputSchema: tool.parameters
                 ? await toJsonSchema(tool.parameters)
                 : {
                     additionalProperties: false,
                     properties: {},
                     type: "object",
-                  }, // More complete schema for Cursor compatibility
+                  },
               name: tool.name,
             };
           }),
-        ),
-      };
-    });
+        );
+
+        // Apply optional tool filtering
+        if (this.#toolFilter) {
+          try {
+            const context: ToolFilterContext = {
+              body: request.params,
+              headers: (extra?._meta?.headers as Record<string, string>) || {},
+              meta: extra?._meta,
+              method: (request.method as string) || "POST",
+              path: (extra?._meta?.path as string) || "/mcp",
+            };
+
+            toolList = await this.#toolFilter(toolList, context);
+          } catch (error) {
+            // Log error but don't fail the request - return unfiltered tools
+            console.error("Tool filter function failed:", error);
+          }
+        }
+
+        return {
+          tools: toolList.map((tool) => {
+            const result: {
+              annotations?: unknown;
+              description: string;
+              inputSchema: unknown;
+              name: string;
+            } = {
+              description: tool.description,
+              inputSchema: tool.inputSchema,
+              name: tool.name,
+            };
+            if (tool.annotations) {
+              result.annotations = tool.annotations;
+            }
+            return result;
+          }),
+        };
+      },
+    );
 
     this.#server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const tool = tools.find((tool) => tool.name === request.params.name);
@@ -1909,6 +2002,7 @@ export class FastMCP<
   #resources: Resource<T>[] = [];
   #resourcesTemplates: InputResourceTemplate<T>[] = [];
   #sessions: FastMCPSession<T>[] = [];
+  #toolFilter?: ToolFilterFunction;
 
   #tools: Tool<T>[] = [];
 
@@ -1918,6 +2012,7 @@ export class FastMCP<
     this.#options = options;
     this.#authenticate = options.authenticate;
     this.#logger = options.logger || console;
+    this.#toolFilter = options.toolFilter;
   }
 
   /**
@@ -2083,6 +2178,7 @@ export class FastMCP<
         resources: this.#resources,
         resourcesTemplates: this.#resourcesTemplates,
         roots: this.#options.roots,
+        toolFilter: this.#toolFilter,
         tools: this.#tools,
         transportType: "stdio",
         utils: this.#options.utils,
@@ -2242,6 +2338,7 @@ export class FastMCP<
       resources: this.#resources,
       resourcesTemplates: this.#resourcesTemplates,
       roots: this.#options.roots,
+      toolFilter: this.#toolFilter,
       tools: allowedTools,
       transportType: "httpStream",
       utils: this.#options.utils,
