@@ -1,5 +1,11 @@
 name: Build and Publish Package
 
+# Required permissions for GitHub Packages publishing
+permissions:
+  contents: write
+  packages: write
+  pull-requests: read
+
 on:
   # Trigger on pushes to main branch
   push:
