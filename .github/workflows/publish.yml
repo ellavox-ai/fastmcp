@@ -50,7 +50,7 @@ jobs:
           node-version: "22"
           cache: "pnpm"
           registry-url: "https://npm.pkg.github.com"
-          scope: "@ellavox"
+          scope: "@ellavox-ai"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -100,7 +100,7 @@ jobs:
           node-version: "22"
           cache: "pnpm"
           registry-url: "https://npm.pkg.github.com"
-          scope: "@ellavox"
+          scope: "@ellavox-ai"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -194,7 +194,7 @@ jobs:
 
             Install with:
             ```bash
-            npm install @ellavox/fastmcp@${{ steps.bump.outputs.new_version }}
+            npm install @ellavox-ai/fastmcp@${{ steps.bump.outputs.new_version }}
             ```
           draft: false
           prerelease: false
@@ -216,7 +216,7 @@ jobs:
         with:
           node-version: "22"
           registry-url: "https://npm.pkg.github.com"
-          scope: "@ellavox"
+          scope: "@ellavox-ai"
 
       - name: Create test project
         run: |
@@ -224,14 +224,14 @@ jobs:
           cd test-install
           pnpm init
           echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" > .npmrc
-          echo "@ellavox:registry=https://npm.pkg.github.com" >> .npmrc
+          echo "@ellavox-ai:registry=https://npm.pkg.github.com" >> .npmrc
 
       - name: Test package installation
         run: |
           cd test-install
-          pnpm add @ellavox/fastmcp
+          pnpm add @ellavox-ai/fastmcp
           node -e "
-            import('@ellavox/fastmcp').then(pkg => {
+            import('@ellavox-ai/fastmcp').then(pkg => {
               console.log('✅ Package installed successfully');
               console.log('Exported:', Object.keys(pkg));
               if (pkg.FastMCP) {
