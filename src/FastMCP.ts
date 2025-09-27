@@ -92,13 +92,6 @@ type FastMCPSessionEvents = {
   rootsChanged: (event: { roots: Root[] }) => void;
 };
 
-interface RequestExtra {
-  _meta?: { headers?: Record<string, string> };
-  headers?: Record<string, string>;
-  request?: { headers?: Record<string, string> };
-  requestInfo?: { headers?: Record<string, string> };
-}
-
 export const imageContent = async (
   input: { buffer: Buffer } | { path: string } | { url: string },
 ): Promise<ImageContent> => {
@@ -1233,23 +1226,35 @@ export class FastMCPSession<
    * Gets the current request headers if available, otherwise returns session headers.
    * This method can be called from within tool execution to access headers.
    */
-  public getCurrentHeaders(extra?: RequestExtra): Record<string, string> {
-    if (extra?.requestInfo?.headers) {
+  public getCurrentHeaders(extra?: unknown): Record<string, string> {
+    // Type guard to safely access properties on unknown type
+    const extraObj = extra as Record<string, unknown>;
+
+    if (
+      extraObj?.requestInfo?.headers &&
+      typeof extraObj.requestInfo.headers === "object"
+    ) {
       console.log(
         "🔍 Using current request headers from extra.requestInfo.headers",
       );
-      return extra.requestInfo.headers;
-    } else if (extra?._meta?.headers) {
+      return extraObj.requestInfo.headers as Record<string, string>;
+    } else if (
+      extraObj?._meta?.headers &&
+      typeof extraObj._meta.headers === "object"
+    ) {
       console.log("🔍 Using current request headers from extra._meta.headers");
-      return extra._meta.headers;
-    } else if (extra?.headers) {
+      return extraObj._meta.headers as Record<string, string>;
+    } else if (extraObj?.headers && typeof extraObj.headers === "object") {
       console.log("🔍 Using current request headers from extra.headers");
-      return extra.headers;
-    } else if (extra?.request?.headers) {
+      return extraObj.headers as Record<string, string>;
+    } else if (
+      extraObj?.request?.headers &&
+      typeof extraObj.request.headers === "object"
+    ) {
       console.log(
         "🔍 Using current request headers from extra.request.headers",
       );
-      return extra.request.headers;
+      return extraObj.request.headers as Record<string, string>;
     }
     console.log("🔍 Using session headers as fallback");
     return this.#httpHeaders || {};
