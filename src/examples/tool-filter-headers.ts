@@ -1,9 +1,9 @@
 import { FastMCP } from "../FastMCP.js";
 
-// Example demonstrating HTTP header forwarding to tool filter
+// Example demonstrating role-based tool filtering using HTTP headers
 const server = new FastMCP({
-  name: "Tool Filter Headers Demo",
-  // Tool filter that checks headers
+  name: "Role-Based Tool Filter Demo",
+  // Tool filter that checks user role from headers
   toolFilter: async (tools, context) => {
     console.log("🔍 Tool filter called with headers:", context.headers);
     console.log(
@@ -11,63 +11,94 @@ const server = new FastMCP({
       tools.map((t) => t.name),
     );
 
-    // Example: Filter tools based on x-provider header
-    const provider = context.headers["x-provider"];
-    console.log("🏷️ Provider from header:", provider);
+    // Example: Filter tools based on x-user-role header
+    const userRole = context.headers["x-user-role"];
+    console.log("👤 User role from header:", userRole);
 
-    if (provider === "vapi") {
-      // Only return tools that work with VAPI
-      const vapiTools = tools.filter(
-        (tool) => tool.name.includes("vapi") || tool.name.includes("audio"),
+    if (userRole === "admin") {
+      // Admins get access to all tools
+      console.log("✅ Admin access: returning all tools");
+      return tools;
+    } else if (userRole === "editor") {
+      // Editors get read and write tools, but no admin tools
+      const editorTools = tools.filter(
+        (tool) => !tool.name.includes("admin") && !tool.name.includes("delete"),
       );
       console.log(
-        "✅ Filtered for VAPI:",
-        vapiTools.map((t) => t.name),
+        "✅ Editor access:",
+        editorTools.map((t) => t.name),
       );
-      return vapiTools;
-    } else if (provider === "web") {
-      // Only return web-related tools
-      const webTools = tools.filter(
-        (tool) => tool.name.includes("web") || tool.name.includes("http"),
+      return editorTools;
+    } else if (userRole === "viewer") {
+      // Viewers get only read-only tools
+      const viewerTools = tools.filter(
+        (tool) =>
+          tool.name.includes("read") ||
+          tool.name.includes("get") ||
+          tool.name.includes("list"),
       );
       console.log(
-        "✅ Filtered for Web:",
-        webTools.map((t) => t.name),
+        "✅ Viewer access:",
+        viewerTools.map((t) => t.name),
       );
-      return webTools;
+      return viewerTools;
     }
 
-    // Return all tools for other providers or no provider
-    console.log("✅ No filtering applied, returning all tools");
-    return tools;
+    // No role or unknown role - return minimal tools
+    console.log("⚠️ No valid role found, returning public tools only");
+    const publicTools = tools.filter((tool) => tool.name.includes("public"));
+    return publicTools;
   },
-
   version: "1.0.0",
 });
 
-// Add some example tools
+// Add example tools with different permission levels
 server.addTool({
-  description: "Make a phone call using VAPI",
-  execute: async () => "Called via VAPI",
-  name: "vapi_make_call",
+  description: "Read system configuration",
+  execute: async () => "Config data retrieved",
+  name: "read_config",
 });
 
 server.addTool({
-  description: "Scrape a web page",
-  execute: async () => "Scraped web page",
-  name: "web_scrape",
+  description: "Get user information",
+  execute: async () => "User data retrieved",
+  name: "get_users",
 });
 
 server.addTool({
-  description: "A general purpose tool",
-  execute: async () => "General tool executed",
-  name: "general_tool",
+  description: "List all resources",
+  execute: async () => "Resources listed",
+  name: "list_resources",
 });
 
 server.addTool({
-  description: "Transcribe audio file",
-  execute: async () => "Audio transcribed",
-  name: "audio_transcribe",
+  description: "Update system settings",
+  execute: async () => "Settings updated",
+  name: "update_settings",
+});
+
+server.addTool({
+  description: "Create new content",
+  execute: async () => "Content created",
+  name: "create_content",
+});
+
+server.addTool({
+  description: "Delete sensitive data (admin only)",
+  execute: async () => "Data deleted",
+  name: "admin_delete_data",
+});
+
+server.addTool({
+  description: "System administration tool",
+  execute: async () => "Admin operation completed",
+  name: "admin_manage_system",
+});
+
+server.addTool({
+  description: "Public information access",
+  execute: async () => "Public info retrieved",
+  name: "public_info",
 });
 
 // Start the server
@@ -81,13 +112,26 @@ server.start({
 
 console.log("🚀 Server started on http://localhost:8080/mcp");
 console.log("");
-console.log("📝 Test the tool filtering with different headers:");
+console.log("📝 Test the role-based tool filtering with different headers:");
+console.log("   # Admin user (gets all tools):");
 console.log("   curl -X POST http://localhost:8080/mcp \\");
 console.log("     -H 'Content-Type: application/json' \\");
-console.log("     -H 'x-provider: vapi' \\");
+console.log("     -H 'x-user-role: admin' \\");
 console.log('     -d \'{"jsonrpc":"2.0","method":"tools/list","id":1}\'');
 console.log("");
+console.log("   # Editor user (gets read/write tools, no admin tools):");
 console.log("   curl -X POST http://localhost:8080/mcp \\");
 console.log("     -H 'Content-Type: application/json' \\");
-console.log("     -H 'x-provider: web' \\");
+console.log("     -H 'x-user-role: editor' \\");
+console.log('     -d \'{"jsonrpc":"2.0","method":"tools/list","id":1}\'');
+console.log("");
+console.log("   # Viewer user (gets read-only tools):");
+console.log("   curl -X POST http://localhost:8080/mcp \\");
+console.log("     -H 'Content-Type: application/json' \\");
+console.log("     -H 'x-user-role: viewer' \\");
+console.log('     -d \'{"jsonrpc":"2.0","method":"tools/list","id":1}\'');
+console.log("");
+console.log("   # No role (gets public tools only):");
+console.log("   curl -X POST http://localhost:8080/mcp \\");
+console.log("     -H 'Content-Type: application/json' \\");
 console.log('     -d \'{"jsonrpc":"2.0","method":"tools/list","id":1}\'');

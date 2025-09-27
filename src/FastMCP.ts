@@ -990,6 +990,7 @@ export class FastMCPSession<
   #capabilities: ServerCapabilities = {};
   #clientCapabilities?: ClientCapabilities;
   #connectionState: "closed" | "connecting" | "error" | "ready" = "connecting";
+  #currentRequestHeaders?: Record<string, string>;
   #httpHeaders?: Record<string, string>;
   #logger: Logger;
   #loggingLevel: LoggingLevel = "info";
@@ -1227,6 +1228,15 @@ export class FastMCPSession<
     options?: RequestOptions,
   ): Promise<SamplingResponse> {
     return this.#server.createMessage(message, options);
+  }
+
+  /**
+   * Updates the current request headers for tool filtering.
+   * This is automatically called during list_tools and call_tool requests
+   * to ensure the tool filter has access to the most recent headers.
+   */
+  public updateCurrentHeaders(headers: Record<string, string>): void {
+    this.#currentRequestHeaders = headers;
   }
 
   public waitForReady(): Promise<void> {
@@ -1691,6 +1701,14 @@ export class FastMCPSession<
     this.#server.setRequestHandler(
       ListToolsRequestSchema,
       async (request, extra) => {
+        // Update headers from current request if available
+        const extraHeaders = extra?._meta?.headers as
+          | Record<string, string>
+          | undefined;
+        if (extraHeaders && Object.keys(extraHeaders).length > 0) {
+          this.updateCurrentHeaders(extraHeaders);
+        }
+
         // Convert internal tools to filterable format
         let toolList: FilterableToolList = await Promise.all(
           tools.map(async (tool): Promise<FilterableTool> => {
@@ -1712,9 +1730,13 @@ export class FastMCPSession<
         // Apply optional tool filtering
         if (this.#toolFilter) {
           try {
+            // Use current request headers (just updated above) or fallback to session headers
+            const headers =
+              this.#currentRequestHeaders || this.#httpHeaders || {};
+
             const context: ToolFilterContext = {
               body: request.params,
-              headers: this.#httpHeaders || {},
+              headers,
               meta: extra?._meta,
               method: (request.method as string) || "POST",
               path: (extra?._meta?.path as string) || "/mcp",
@@ -1748,218 +1770,229 @@ export class FastMCPSession<
       },
     );
 
-    this.#server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      const tool = tools.find((tool) => tool.name === request.params.name);
+    this.#server.setRequestHandler(
+      CallToolRequestSchema,
+      async (request, extra) => {
+        // Update headers from current request if available
+        const extraHeaders = extra?._meta?.headers as
+          | Record<string, string>
+          | undefined;
+        if (extraHeaders && Object.keys(extraHeaders).length > 0) {
+          this.updateCurrentHeaders(extraHeaders);
+        }
 
-      if (!tool) {
-        throw new McpError(
-          ErrorCode.MethodNotFound,
-          `Unknown tool: ${request.params.name}`,
-        );
-      }
+        const tool = tools.find((tool) => tool.name === request.params.name);
 
-      let args: unknown = undefined;
-
-      if (tool.parameters) {
-        const parsed = await tool.parameters["~standard"].validate(
-          request.params.arguments,
-        );
-
-        if (parsed.issues) {
-          const friendlyErrors = this.#utils?.formatInvalidParamsErrorMessage
-            ? this.#utils.formatInvalidParamsErrorMessage(parsed.issues)
-            : parsed.issues
-                .map((issue) => {
-                  const path = issue.path?.join(".") || "root";
-                  return `${path}: ${issue.message}`;
-                })
-                .join(", ");
-
+        if (!tool) {
           throw new McpError(
-            ErrorCode.InvalidParams,
-            `Tool '${request.params.name}' parameter validation failed: ${friendlyErrors}. Please check the parameter types and values according to the tool's schema.`,
+            ErrorCode.MethodNotFound,
+            `Unknown tool: ${request.params.name}`,
           );
         }
 
-        args = parsed.value;
-      }
+        let args: unknown = undefined;
 
-      const progressToken = request.params?._meta?.progressToken;
+        if (tool.parameters) {
+          const parsed = await tool.parameters["~standard"].validate(
+            request.params.arguments,
+          );
 
-      let result: ContentResult;
+          if (parsed.issues) {
+            const friendlyErrors = this.#utils?.formatInvalidParamsErrorMessage
+              ? this.#utils.formatInvalidParamsErrorMessage(parsed.issues)
+              : parsed.issues
+                  .map((issue) => {
+                    const path = issue.path?.join(".") || "root";
+                    return `${path}: ${issue.message}`;
+                  })
+                  .join(", ");
 
-      try {
-        const reportProgress = async (progress: Progress) => {
-          try {
-            await this.#server.notification({
-              method: "notifications/progress",
-              params: {
-                ...progress,
-                progressToken,
-              },
-            });
-
-            if (this.#needsEventLoopFlush) {
-              await new Promise((resolve) => setImmediate(resolve));
-            }
-          } catch (progressError) {
-            this.#logger.warn(
-              `[FastMCP warning] Failed to report progress for tool '${request.params.name}':`,
-              progressError instanceof Error
-                ? progressError.message
-                : String(progressError),
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              `Tool '${request.params.name}' parameter validation failed: ${friendlyErrors}. Please check the parameter types and values according to the tool's schema.`,
             );
           }
-        };
 
-        const log = {
-          debug: (message: string, context?: SerializableValue) => {
-            this.#server.sendLoggingMessage({
-              data: {
-                context,
-                message,
-              },
-              level: "debug",
-            });
-          },
-          error: (message: string, context?: SerializableValue) => {
-            this.#server.sendLoggingMessage({
-              data: {
-                context,
-                message,
-              },
-              level: "error",
-            });
-          },
-          info: (message: string, context?: SerializableValue) => {
-            this.#server.sendLoggingMessage({
-              data: {
-                context,
-                message,
-              },
-              level: "info",
-            });
-          },
-          warn: (message: string, context?: SerializableValue) => {
-            this.#server.sendLoggingMessage({
-              data: {
-                context,
-                message,
-              },
-              level: "warning",
-            });
-          },
-        };
-
-        // Create a promise for tool execution
-        // Streams partial results while a tool is still executing
-        // Enables progressive rendering and real-time feedback
-        const streamContent = async (content: Content | Content[]) => {
-          const contentArray = Array.isArray(content) ? content : [content];
-
-          try {
-            await this.#server.notification({
-              method: "notifications/tool/streamContent",
-              params: {
-                content: contentArray,
-                toolName: request.params.name,
-              },
-            });
-
-            if (this.#needsEventLoopFlush) {
-              await new Promise((resolve) => setImmediate(resolve));
-            }
-          } catch (streamError) {
-            this.#logger.warn(
-              `[FastMCP warning] Failed to stream content for tool '${request.params.name}':`,
-              streamError instanceof Error
-                ? streamError.message
-                : String(streamError),
-            );
-          }
-        };
-
-        const executeToolPromise = tool.execute(args, {
-          client: {
-            version: this.#server.getClientVersion(),
-          },
-          log,
-          reportProgress,
-          session: this.#auth,
-          streamContent,
-        });
-
-        // Handle timeout if specified
-        const maybeStringResult = (await (tool.timeoutMs
-          ? Promise.race([
-              executeToolPromise,
-              new Promise<never>((_, reject) => {
-                const timeoutId = setTimeout(() => {
-                  reject(
-                    new UserError(
-                      `Tool '${request.params.name}' timed out after ${tool.timeoutMs}ms. Consider increasing timeoutMs or optimizing the tool implementation.`,
-                    ),
-                  );
-                }, tool.timeoutMs);
-
-                // If promise resolves first
-                executeToolPromise.finally(() => clearTimeout(timeoutId));
-              }),
-            ])
-          : executeToolPromise)) as
-          | AudioContent
-          | ContentResult
-          | ImageContent
-          | null
-          | ResourceContent
-          | ResourceLink
-          | string
-          | TextContent
-          | undefined;
-
-        // Without this test, we are running into situations where the last progress update is not reported.
-        // See the 'reports multiple progress updates without buffering' test in FastMCP.test.ts before refactoring.
-        await delay(1);
-
-        if (maybeStringResult === undefined || maybeStringResult === null) {
-          result = ContentResultZodSchema.parse({
-            content: [],
-          });
-        } else if (typeof maybeStringResult === "string") {
-          result = ContentResultZodSchema.parse({
-            content: [{ text: maybeStringResult, type: "text" }],
-          });
-        } else if ("type" in maybeStringResult) {
-          result = ContentResultZodSchema.parse({
-            content: [maybeStringResult],
-          });
-        } else {
-          result = ContentResultZodSchema.parse(maybeStringResult);
+          args = parsed.value;
         }
-      } catch (error) {
-        if (error instanceof UserError) {
+
+        const progressToken = request.params?._meta?.progressToken;
+
+        let result: ContentResult;
+
+        try {
+          const reportProgress = async (progress: Progress) => {
+            try {
+              await this.#server.notification({
+                method: "notifications/progress",
+                params: {
+                  ...progress,
+                  progressToken,
+                },
+              });
+
+              if (this.#needsEventLoopFlush) {
+                await new Promise((resolve) => setImmediate(resolve));
+              }
+            } catch (progressError) {
+              this.#logger.warn(
+                `[FastMCP warning] Failed to report progress for tool '${request.params.name}':`,
+                progressError instanceof Error
+                  ? progressError.message
+                  : String(progressError),
+              );
+            }
+          };
+
+          const log = {
+            debug: (message: string, context?: SerializableValue) => {
+              this.#server.sendLoggingMessage({
+                data: {
+                  context,
+                  message,
+                },
+                level: "debug",
+              });
+            },
+            error: (message: string, context?: SerializableValue) => {
+              this.#server.sendLoggingMessage({
+                data: {
+                  context,
+                  message,
+                },
+                level: "error",
+              });
+            },
+            info: (message: string, context?: SerializableValue) => {
+              this.#server.sendLoggingMessage({
+                data: {
+                  context,
+                  message,
+                },
+                level: "info",
+              });
+            },
+            warn: (message: string, context?: SerializableValue) => {
+              this.#server.sendLoggingMessage({
+                data: {
+                  context,
+                  message,
+                },
+                level: "warning",
+              });
+            },
+          };
+
+          // Create a promise for tool execution
+          // Streams partial results while a tool is still executing
+          // Enables progressive rendering and real-time feedback
+          const streamContent = async (content: Content | Content[]) => {
+            const contentArray = Array.isArray(content) ? content : [content];
+
+            try {
+              await this.#server.notification({
+                method: "notifications/tool/streamContent",
+                params: {
+                  content: contentArray,
+                  toolName: request.params.name,
+                },
+              });
+
+              if (this.#needsEventLoopFlush) {
+                await new Promise((resolve) => setImmediate(resolve));
+              }
+            } catch (streamError) {
+              this.#logger.warn(
+                `[FastMCP warning] Failed to stream content for tool '${request.params.name}':`,
+                streamError instanceof Error
+                  ? streamError.message
+                  : String(streamError),
+              );
+            }
+          };
+
+          const executeToolPromise = tool.execute(args, {
+            client: {
+              version: this.#server.getClientVersion(),
+            },
+            log,
+            reportProgress,
+            session: this.#auth,
+            streamContent,
+          });
+
+          // Handle timeout if specified
+          const maybeStringResult = (await (tool.timeoutMs
+            ? Promise.race([
+                executeToolPromise,
+                new Promise<never>((_, reject) => {
+                  const timeoutId = setTimeout(() => {
+                    reject(
+                      new UserError(
+                        `Tool '${request.params.name}' timed out after ${tool.timeoutMs}ms. Consider increasing timeoutMs or optimizing the tool implementation.`,
+                      ),
+                    );
+                  }, tool.timeoutMs);
+
+                  // If promise resolves first
+                  executeToolPromise.finally(() => clearTimeout(timeoutId));
+                }),
+              ])
+            : executeToolPromise)) as
+            | AudioContent
+            | ContentResult
+            | ImageContent
+            | null
+            | ResourceContent
+            | ResourceLink
+            | string
+            | TextContent
+            | undefined;
+
+          // Without this test, we are running into situations where the last progress update is not reported.
+          // See the 'reports multiple progress updates without buffering' test in FastMCP.test.ts before refactoring.
+          await delay(1);
+
+          if (maybeStringResult === undefined || maybeStringResult === null) {
+            result = ContentResultZodSchema.parse({
+              content: [],
+            });
+          } else if (typeof maybeStringResult === "string") {
+            result = ContentResultZodSchema.parse({
+              content: [{ text: maybeStringResult, type: "text" }],
+            });
+          } else if ("type" in maybeStringResult) {
+            result = ContentResultZodSchema.parse({
+              content: [maybeStringResult],
+            });
+          } else {
+            result = ContentResultZodSchema.parse(maybeStringResult);
+          }
+        } catch (error) {
+          if (error instanceof UserError) {
+            return {
+              content: [{ text: error.message, type: "text" }],
+              isError: true,
+              ...(error.extras ? { structuredContent: error.extras } : {}),
+            };
+          }
+
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
           return {
-            content: [{ text: error.message, type: "text" }],
+            content: [
+              {
+                text: `Tool '${request.params.name}' execution failed: ${errorMessage}`,
+                type: "text",
+              },
+            ],
             isError: true,
-            ...(error.extras ? { structuredContent: error.extras } : {}),
           };
         }
 
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        return {
-          content: [
-            {
-              text: `Tool '${request.params.name}' execution failed: ${errorMessage}`,
-              type: "text",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      return result;
-    });
+        return result;
+      },
+    );
   }
 }
 
