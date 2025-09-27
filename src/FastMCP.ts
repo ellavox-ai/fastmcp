@@ -92,6 +92,13 @@ type FastMCPSessionEvents = {
   rootsChanged: (event: { roots: Root[] }) => void;
 };
 
+interface RequestExtra {
+  _meta?: { headers?: Record<string, string> };
+  headers?: Record<string, string>;
+  request?: { headers?: Record<string, string> };
+  requestInfo?: { headers?: Record<string, string> };
+}
+
 export const imageContent = async (
   input: { buffer: Buffer } | { path: string } | { url: string },
 ): Promise<ImageContent> => {
@@ -1222,6 +1229,32 @@ export class FastMCPSession<
     }
   }
 
+  /**
+   * Gets the current request headers if available, otherwise returns session headers.
+   * This method can be called from within tool execution to access headers.
+   */
+  public getCurrentHeaders(extra?: RequestExtra): Record<string, string> {
+    if (extra?.requestInfo?.headers) {
+      console.log(
+        "🔍 Using current request headers from extra.requestInfo.headers",
+      );
+      return extra.requestInfo.headers;
+    } else if (extra?._meta?.headers) {
+      console.log("🔍 Using current request headers from extra._meta.headers");
+      return extra._meta.headers;
+    } else if (extra?.headers) {
+      console.log("🔍 Using current request headers from extra.headers");
+      return extra.headers;
+    } else if (extra?.request?.headers) {
+      console.log(
+        "🔍 Using current request headers from extra.request.headers",
+      );
+      return extra.request.headers;
+    }
+    console.log("🔍 Using session headers as fallback");
+    return this.#httpHeaders || {};
+  }
+
   public async requestSampling(
     message: z.infer<typeof CreateMessageRequestSchema>["params"],
     options?: RequestOptions,
@@ -1691,8 +1724,8 @@ export class FastMCPSession<
     this.#server.setRequestHandler(
       ListToolsRequestSchema,
       async (request, extra) => {
-        // Headers are captured during session creation and stored in this.#httpHeaders
-        // No need to update from extra._meta as mcp-proxy doesn't populate that field
+        // Headers are available from current request via extra.requestInfo.headers
+        // with fallback to session headers captured during creation
 
         // Convert internal tools to filterable format
         let toolList: FilterableToolList = await Promise.all(
@@ -1715,8 +1748,9 @@ export class FastMCPSession<
         // Apply optional tool filtering
         if (this.#toolFilter) {
           try {
-            // Use session headers which contain all headers from the original HTTP request
-            const headers = this.#httpHeaders || {};
+            // Get current request headers with fallback to session headers
+            const headers = this.getCurrentHeaders(extra);
+
             console.log(
               "🔍 Tool filter using headers:",
               Object.keys(headers).length,
@@ -1760,220 +1794,231 @@ export class FastMCPSession<
       },
     );
 
-    this.#server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      // Headers are available from session creation in this.#httpHeaders
-
-      const tool = tools.find((tool) => tool.name === request.params.name);
-
-      if (!tool) {
-        throw new McpError(
-          ErrorCode.MethodNotFound,
-          `Unknown tool: ${request.params.name}`,
-        );
-      }
-
-      let args: unknown = undefined;
-
-      if (tool.parameters) {
-        const parsed = await tool.parameters["~standard"].validate(
-          request.params.arguments,
+    this.#server.setRequestHandler(
+      CallToolRequestSchema,
+      async (request, extra) => {
+        // Headers are available from current request via extra.requestInfo.headers
+        // with fallback to session headers captured during creation
+        const currentHeaders = this.getCurrentHeaders(extra);
+        console.log(
+          "🔍 CallTool using headers:",
+          Object.keys(currentHeaders).length,
+          "headers including:",
+          Object.keys(currentHeaders).filter((k) => k.startsWith("x-")),
         );
 
-        if (parsed.issues) {
-          const friendlyErrors = this.#utils?.formatInvalidParamsErrorMessage
-            ? this.#utils.formatInvalidParamsErrorMessage(parsed.issues)
-            : parsed.issues
-                .map((issue) => {
-                  const path = issue.path?.join(".") || "root";
-                  return `${path}: ${issue.message}`;
-                })
-                .join(", ");
+        const tool = tools.find((tool) => tool.name === request.params.name);
 
+        if (!tool) {
           throw new McpError(
-            ErrorCode.InvalidParams,
-            `Tool '${request.params.name}' parameter validation failed: ${friendlyErrors}. Please check the parameter types and values according to the tool's schema.`,
+            ErrorCode.MethodNotFound,
+            `Unknown tool: ${request.params.name}`,
           );
         }
 
-        args = parsed.value;
-      }
+        let args: unknown = undefined;
 
-      const progressToken = request.params?._meta?.progressToken;
+        if (tool.parameters) {
+          const parsed = await tool.parameters["~standard"].validate(
+            request.params.arguments,
+          );
 
-      let result: ContentResult;
+          if (parsed.issues) {
+            const friendlyErrors = this.#utils?.formatInvalidParamsErrorMessage
+              ? this.#utils.formatInvalidParamsErrorMessage(parsed.issues)
+              : parsed.issues
+                  .map((issue) => {
+                    const path = issue.path?.join(".") || "root";
+                    return `${path}: ${issue.message}`;
+                  })
+                  .join(", ");
 
-      try {
-        const reportProgress = async (progress: Progress) => {
-          try {
-            await this.#server.notification({
-              method: "notifications/progress",
-              params: {
-                ...progress,
-                progressToken,
-              },
-            });
-
-            if (this.#needsEventLoopFlush) {
-              await new Promise((resolve) => setImmediate(resolve));
-            }
-          } catch (progressError) {
-            this.#logger.warn(
-              `[FastMCP warning] Failed to report progress for tool '${request.params.name}':`,
-              progressError instanceof Error
-                ? progressError.message
-                : String(progressError),
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              `Tool '${request.params.name}' parameter validation failed: ${friendlyErrors}. Please check the parameter types and values according to the tool's schema.`,
             );
           }
-        };
 
-        const log = {
-          debug: (message: string, context?: SerializableValue) => {
-            this.#server.sendLoggingMessage({
-              data: {
-                context,
-                message,
-              },
-              level: "debug",
-            });
-          },
-          error: (message: string, context?: SerializableValue) => {
-            this.#server.sendLoggingMessage({
-              data: {
-                context,
-                message,
-              },
-              level: "error",
-            });
-          },
-          info: (message: string, context?: SerializableValue) => {
-            this.#server.sendLoggingMessage({
-              data: {
-                context,
-                message,
-              },
-              level: "info",
-            });
-          },
-          warn: (message: string, context?: SerializableValue) => {
-            this.#server.sendLoggingMessage({
-              data: {
-                context,
-                message,
-              },
-              level: "warning",
-            });
-          },
-        };
-
-        // Create a promise for tool execution
-        // Streams partial results while a tool is still executing
-        // Enables progressive rendering and real-time feedback
-        const streamContent = async (content: Content | Content[]) => {
-          const contentArray = Array.isArray(content) ? content : [content];
-
-          try {
-            await this.#server.notification({
-              method: "notifications/tool/streamContent",
-              params: {
-                content: contentArray,
-                toolName: request.params.name,
-              },
-            });
-
-            if (this.#needsEventLoopFlush) {
-              await new Promise((resolve) => setImmediate(resolve));
-            }
-          } catch (streamError) {
-            this.#logger.warn(
-              `[FastMCP warning] Failed to stream content for tool '${request.params.name}':`,
-              streamError instanceof Error
-                ? streamError.message
-                : String(streamError),
-            );
-          }
-        };
-
-        const executeToolPromise = tool.execute(args, {
-          client: {
-            version: this.#server.getClientVersion(),
-          },
-          log,
-          reportProgress,
-          session: this.#auth,
-          streamContent,
-        });
-
-        // Handle timeout if specified
-        const maybeStringResult = (await (tool.timeoutMs
-          ? Promise.race([
-              executeToolPromise,
-              new Promise<never>((_, reject) => {
-                const timeoutId = setTimeout(() => {
-                  reject(
-                    new UserError(
-                      `Tool '${request.params.name}' timed out after ${tool.timeoutMs}ms. Consider increasing timeoutMs or optimizing the tool implementation.`,
-                    ),
-                  );
-                }, tool.timeoutMs);
-
-                // If promise resolves first
-                executeToolPromise.finally(() => clearTimeout(timeoutId));
-              }),
-            ])
-          : executeToolPromise)) as
-          | AudioContent
-          | ContentResult
-          | ImageContent
-          | null
-          | ResourceContent
-          | ResourceLink
-          | string
-          | TextContent
-          | undefined;
-
-        // Without this test, we are running into situations where the last progress update is not reported.
-        // See the 'reports multiple progress updates without buffering' test in FastMCP.test.ts before refactoring.
-        await delay(1);
-
-        if (maybeStringResult === undefined || maybeStringResult === null) {
-          result = ContentResultZodSchema.parse({
-            content: [],
-          });
-        } else if (typeof maybeStringResult === "string") {
-          result = ContentResultZodSchema.parse({
-            content: [{ text: maybeStringResult, type: "text" }],
-          });
-        } else if ("type" in maybeStringResult) {
-          result = ContentResultZodSchema.parse({
-            content: [maybeStringResult],
-          });
-        } else {
-          result = ContentResultZodSchema.parse(maybeStringResult);
+          args = parsed.value;
         }
-      } catch (error) {
-        if (error instanceof UserError) {
+
+        const progressToken = request.params?._meta?.progressToken;
+
+        let result: ContentResult;
+
+        try {
+          const reportProgress = async (progress: Progress) => {
+            try {
+              await this.#server.notification({
+                method: "notifications/progress",
+                params: {
+                  ...progress,
+                  progressToken,
+                },
+              });
+
+              if (this.#needsEventLoopFlush) {
+                await new Promise((resolve) => setImmediate(resolve));
+              }
+            } catch (progressError) {
+              this.#logger.warn(
+                `[FastMCP warning] Failed to report progress for tool '${request.params.name}':`,
+                progressError instanceof Error
+                  ? progressError.message
+                  : String(progressError),
+              );
+            }
+          };
+
+          const log = {
+            debug: (message: string, context?: SerializableValue) => {
+              this.#server.sendLoggingMessage({
+                data: {
+                  context,
+                  message,
+                },
+                level: "debug",
+              });
+            },
+            error: (message: string, context?: SerializableValue) => {
+              this.#server.sendLoggingMessage({
+                data: {
+                  context,
+                  message,
+                },
+                level: "error",
+              });
+            },
+            info: (message: string, context?: SerializableValue) => {
+              this.#server.sendLoggingMessage({
+                data: {
+                  context,
+                  message,
+                },
+                level: "info",
+              });
+            },
+            warn: (message: string, context?: SerializableValue) => {
+              this.#server.sendLoggingMessage({
+                data: {
+                  context,
+                  message,
+                },
+                level: "warning",
+              });
+            },
+          };
+
+          // Create a promise for tool execution
+          // Streams partial results while a tool is still executing
+          // Enables progressive rendering and real-time feedback
+          const streamContent = async (content: Content | Content[]) => {
+            const contentArray = Array.isArray(content) ? content : [content];
+
+            try {
+              await this.#server.notification({
+                method: "notifications/tool/streamContent",
+                params: {
+                  content: contentArray,
+                  toolName: request.params.name,
+                },
+              });
+
+              if (this.#needsEventLoopFlush) {
+                await new Promise((resolve) => setImmediate(resolve));
+              }
+            } catch (streamError) {
+              this.#logger.warn(
+                `[FastMCP warning] Failed to stream content for tool '${request.params.name}':`,
+                streamError instanceof Error
+                  ? streamError.message
+                  : String(streamError),
+              );
+            }
+          };
+
+          const executeToolPromise = tool.execute(args, {
+            client: {
+              version: this.#server.getClientVersion(),
+            },
+            log,
+            reportProgress,
+            session: this.#auth,
+            streamContent,
+          });
+
+          // Handle timeout if specified
+          const maybeStringResult = (await (tool.timeoutMs
+            ? Promise.race([
+                executeToolPromise,
+                new Promise<never>((_, reject) => {
+                  const timeoutId = setTimeout(() => {
+                    reject(
+                      new UserError(
+                        `Tool '${request.params.name}' timed out after ${tool.timeoutMs}ms. Consider increasing timeoutMs or optimizing the tool implementation.`,
+                      ),
+                    );
+                  }, tool.timeoutMs);
+
+                  // If promise resolves first
+                  executeToolPromise.finally(() => clearTimeout(timeoutId));
+                }),
+              ])
+            : executeToolPromise)) as
+            | AudioContent
+            | ContentResult
+            | ImageContent
+            | null
+            | ResourceContent
+            | ResourceLink
+            | string
+            | TextContent
+            | undefined;
+
+          // Without this test, we are running into situations where the last progress update is not reported.
+          // See the 'reports multiple progress updates without buffering' test in FastMCP.test.ts before refactoring.
+          await delay(1);
+
+          if (maybeStringResult === undefined || maybeStringResult === null) {
+            result = ContentResultZodSchema.parse({
+              content: [],
+            });
+          } else if (typeof maybeStringResult === "string") {
+            result = ContentResultZodSchema.parse({
+              content: [{ text: maybeStringResult, type: "text" }],
+            });
+          } else if ("type" in maybeStringResult) {
+            result = ContentResultZodSchema.parse({
+              content: [maybeStringResult],
+            });
+          } else {
+            result = ContentResultZodSchema.parse(maybeStringResult);
+          }
+        } catch (error) {
+          if (error instanceof UserError) {
+            return {
+              content: [{ text: error.message, type: "text" }],
+              isError: true,
+              ...(error.extras ? { structuredContent: error.extras } : {}),
+            };
+          }
+
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
           return {
-            content: [{ text: error.message, type: "text" }],
+            content: [
+              {
+                text: `Tool '${request.params.name}' execution failed: ${errorMessage}`,
+                type: "text",
+              },
+            ],
             isError: true,
-            ...(error.extras ? { structuredContent: error.extras } : {}),
           };
         }
 
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        return {
-          content: [
-            {
-              text: `Tool '${request.params.name}' execution failed: ${errorMessage}`,
-              type: "text",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      return result;
-    });
+        return result;
+      },
+    );
   }
 }
 
@@ -2265,6 +2310,7 @@ export class FastMCP<
                 "headers including:",
                 Object.keys(httpHeaders).filter((k) => k.startsWith("x-")),
               );
+              console.log("🔍 Full headers object:", httpHeaders);
             }
 
             // In stateless mode, create a new session for each request
@@ -2317,6 +2363,7 @@ export class FastMCP<
                 "headers including:",
                 Object.keys(httpHeaders).filter((k) => k.startsWith("x-")),
               );
+              console.log("🔍 Full headers object:", httpHeaders);
             }
 
             return this.#createSession(auth, httpHeaders);
