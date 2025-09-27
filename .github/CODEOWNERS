@@ -1,0 +1,9 @@
+# Global code owners for the fastmcp repository
+# These users/teams will be automatically requested for review on all PRs
+
+* @ellavox-ai/maintainers
+
+# Specific protection for workflow files
+/.github/ @ellavox-ai/admin
+/package.json @ellavox-ai/maintainers
+/pnpm-lock.yaml @ellavox-ai/maintainers

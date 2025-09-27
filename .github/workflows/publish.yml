@@ -81,11 +81,12 @@ jobs:
           path: dist/
           retention-days: 7
 
-  # Job 2: Publish to GitHub Packages (only on main branch or manual trigger)
+  # Job 2: Publish to GitHub Packages (only on main branch or manual trigger, and only for organization members)
   publish:
     needs: test-and-build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    environment: release
+    if: (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && github.actor != 'dependabot[bot]' && (github.event_name == 'workflow_dispatch' || github.repository_owner == 'ellavox-ai')
 
     steps:
       - name: Checkout code
