@@ -49,18 +49,6 @@
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
   },
-  "release": {
-    "branches": [
-      "main"
-    ],
-    "plugins": [
-      "@semantic-release/commit-analyzer",
-      "@semantic-release/release-notes-generator",
-      "@semantic-release/npm",
-      "@semantic-release/github",
-      "@sebbo2002/semantic-release-jsr"
-    ]
-  },
   "devDependencies": {
     "@eslint/js": "^9.33.0",
     "@modelcontextprotocol/inspector": "^0.16.2",
