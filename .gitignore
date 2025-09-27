@@ -2,3 +2,7 @@ dist
 node_modules
 !.prettierignore
 .idea
+
+# Lock files (we use pnpm-lock.yaml)
+package-lock.json
+yarn.lock
