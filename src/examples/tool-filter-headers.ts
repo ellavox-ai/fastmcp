@@ -55,19 +55,40 @@ const server = new FastMCP({
 // Add example tools with different permission levels
 server.addTool({
   description: "Read system configuration",
-  execute: async () => "Config data retrieved",
+  execute: async (_args, context) => {
+    console.log(
+      "📝 read_config called with headers:",
+      Object.keys(context.headers),
+    );
+    const userRole = context.headers["x-user-role"] || "unknown";
+    return `Config data retrieved for user role: ${userRole}`;
+  },
   name: "read_config",
 });
 
 server.addTool({
   description: "Get user information",
-  execute: async () => "User data retrieved",
+  execute: async (_args, context) => {
+    console.log(
+      "👥 get_users called with headers:",
+      Object.keys(context.headers),
+    );
+    const sessionId = context.headers["x-session-id"] || "no-session";
+    return `User data retrieved for session: ${sessionId}`;
+  },
   name: "get_users",
 });
 
 server.addTool({
   description: "List all resources",
-  execute: async () => "Resources listed",
+  execute: async (_args, context) => {
+    console.log(
+      "📂 list_resources called with headers:",
+      Object.keys(context.headers),
+    );
+    const requestId = context.headers["x-request-id"] || "unknown";
+    return `Resources listed (request: ${requestId})`;
+  },
   name: "list_resources",
 });
 
@@ -117,18 +138,30 @@ console.log("   # Admin user (gets all tools):");
 console.log("   curl -X POST http://localhost:8080/mcp \\");
 console.log("     -H 'Content-Type: application/json' \\");
 console.log("     -H 'x-user-role: admin' \\");
+console.log("     -H 'x-session-id: admin-session-123' \\");
 console.log('     -d \'{"jsonrpc":"2.0","method":"tools/list","id":1}\'');
+console.log("");
+console.log("   # Call a tool as admin:");
+console.log("   curl -X POST http://localhost:8080/mcp \\");
+console.log("     -H 'Content-Type: application/json' \\");
+console.log("     -H 'x-user-role: admin' \\");
+console.log("     -H 'x-request-id: req-456' \\");
+console.log(
+  '     -d \'{"jsonrpc":"2.0","method":"tools/call","params":{"name":"read_config"},"id":2}\'',
+);
 console.log("");
 console.log("   # Editor user (gets read/write tools, no admin tools):");
 console.log("   curl -X POST http://localhost:8080/mcp \\");
 console.log("     -H 'Content-Type: application/json' \\");
 console.log("     -H 'x-user-role: editor' \\");
+console.log("     -H 'x-session-id: editor-session-456' \\");
 console.log('     -d \'{"jsonrpc":"2.0","method":"tools/list","id":1}\'');
 console.log("");
 console.log("   # Viewer user (gets read-only tools):");
 console.log("   curl -X POST http://localhost:8080/mcp \\");
 console.log("     -H 'Content-Type: application/json' \\");
 console.log("     -H 'x-user-role: viewer' \\");
+console.log("     -H 'x-session-id: viewer-session-789' \\");
 console.log('     -d \'{"jsonrpc":"2.0","method":"tools/list","id":1}\'');
 console.log("");
 console.log("   # No role (gets public tools only):");

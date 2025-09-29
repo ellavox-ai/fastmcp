@@ -234,6 +234,7 @@ type Context<T extends FastMCPSessionAuth> = {
   client: {
     version: ReturnType<Server["getClientVersion"]>;
   };
+  headers: Record<string, string>;
   log: {
     debug: (message: string, data?: SerializableValue) => void;
     error: (message: string, data?: SerializableValue) => void;
@@ -1980,6 +1981,7 @@ export class FastMCPSession<
             client: {
               version: this.#server.getClientVersion(),
             },
+            headers: currentHeaders,
             log,
             reportProgress,
             session: this.#auth,
