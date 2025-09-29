@@ -5,7 +5,10 @@ const server = new FastMCP({
   name: "Role-Based Tool Filter Demo",
   // Tool filter that checks user role from headers
   toolFilter: async (tools, context) => {
+    // Note: In production, use the Logger interface instead of console.log
+    // Example: logger.debug("Tool filter called with headers:", context.headers);
     console.log("🔍 Tool filter called with headers:", context.headers);
+    console.log("🔍 Tool filter called with session:", context.session);
     console.log(
       "📋 Available tools:",
       tools.map((t) => t.name),
@@ -14,6 +17,7 @@ const server = new FastMCP({
     // Example: Filter tools based on x-user-role header
     const userRole = context.headers["x-user-role"];
     console.log("👤 User role from header:", userRole);
+    console.log("👤 Session data available:", !!context.session);
 
     if (userRole === "admin") {
       // Admins get access to all tools
@@ -56,6 +60,7 @@ const server = new FastMCP({
 server.addTool({
   description: "Read system configuration",
   execute: async (_args, context) => {
+    // Note: In production, use context.log.debug() instead of console.log
     console.log(
       "📝 read_config called with headers:",
       Object.keys(context.headers),
@@ -69,6 +74,7 @@ server.addTool({
 server.addTool({
   description: "Get user information",
   execute: async (_args, context) => {
+    // Note: In production, use context.log.debug() instead of console.log
     console.log(
       "👥 get_users called with headers:",
       Object.keys(context.headers),
@@ -82,6 +88,7 @@ server.addTool({
 server.addTool({
   description: "List all resources",
   execute: async (_args, context) => {
+    // Note: In production, use context.log.debug() instead of console.log
     console.log(
       "📂 list_resources called with headers:",
       Object.keys(context.headers),

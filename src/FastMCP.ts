@@ -74,6 +74,8 @@ export interface ToolFilterContext {
   method: string;
   /** Request path (usually /mcp) */
   path: string;
+  /** Session authentication data */
+  session?: unknown;
 }
 
 export type ToolFilterFunction = (
@@ -1230,7 +1232,7 @@ export class FastMCPSession<
   public getCurrentHeaders(extra?: unknown): Record<string, string> {
     // Type guard to safely access properties on unknown type
     if (!extra || typeof extra !== "object") {
-      console.log("🔍 Using session headers as fallback - no extra object");
+      this.#logger.debug("Using session headers as fallback - no extra object");
       return this.#httpHeaders || {};
     }
 
@@ -1244,8 +1246,8 @@ export class FastMCPSession<
         typeof requestInfo.headers === "object" &&
         requestInfo.headers !== null
       ) {
-        console.log(
-          "🔍 Using current request headers from extra.requestInfo.headers",
+        this.#logger.debug(
+          "Using current request headers from extra.requestInfo.headers",
         );
         return requestInfo.headers as Record<string, string>;
       }
@@ -1259,8 +1261,8 @@ export class FastMCPSession<
         typeof meta.headers === "object" &&
         meta.headers !== null
       ) {
-        console.log(
-          "🔍 Using current request headers from extra._meta.headers",
+        this.#logger.debug(
+          "Using current request headers from extra._meta.headers",
         );
         return meta.headers as Record<string, string>;
       }
@@ -1272,7 +1274,7 @@ export class FastMCPSession<
       typeof extraObj.headers === "object" &&
       extraObj.headers !== null
     ) {
-      console.log("🔍 Using current request headers from extra.headers");
+      this.#logger.debug("Using current request headers from extra.headers");
       return extraObj.headers as Record<string, string>;
     }
 
@@ -1284,14 +1286,14 @@ export class FastMCPSession<
         typeof request.headers === "object" &&
         request.headers !== null
       ) {
-        console.log(
-          "🔍 Using current request headers from extra.request.headers",
+        this.#logger.debug(
+          "Using current request headers from extra.request.headers",
         );
         return request.headers as Record<string, string>;
       }
     }
 
-    console.log("🔍 Using session headers as fallback");
+    this.#logger.debug("Using session headers as fallback");
     return this.#httpHeaders || {};
   }
 
@@ -1791,8 +1793,8 @@ export class FastMCPSession<
             // Get current request headers with fallback to session headers
             const headers = this.getCurrentHeaders(extra);
 
-            console.log(
-              "🔍 Tool filter using headers:",
+            this.#logger.debug(
+              "Tool filter using headers:",
               Object.keys(headers).length,
               "headers including:",
               Object.keys(headers).filter((k) => k.startsWith("x-")),
@@ -1804,12 +1806,13 @@ export class FastMCPSession<
               meta: extra?._meta,
               method: (request.method as string) || "POST",
               path: (extra?._meta?.path as string) || "/mcp",
+              session: this.#auth,
             };
 
             toolList = await this.#toolFilter(toolList, context);
           } catch (error) {
             // Log error but don't fail the request - return unfiltered tools
-            console.error("Tool filter function failed:", error);
+            this.#logger.error("Tool filter function failed:", error);
           }
         }
 
@@ -1840,8 +1843,8 @@ export class FastMCPSession<
         // Headers are available from current request via extra.requestInfo.headers
         // with fallback to session headers captured during creation
         const currentHeaders = this.getCurrentHeaders(extra);
-        console.log(
-          "🔍 CallTool using headers:",
+        this.#logger.debug(
+          "CallTool using headers:",
           Object.keys(currentHeaders).length,
           "headers including:",
           Object.keys(currentHeaders).filter((k) => k.startsWith("x-")),
@@ -2345,13 +2348,13 @@ export class FastMCP<
                   httpHeaders[key.toLowerCase()] = value.join(", ");
                 }
               }
-              console.log(
-                "🔍 Stateless session creation - captured headers:",
+              this.#logger.debug(
+                "Stateless session creation - captured headers:",
                 Object.keys(httpHeaders).length,
                 "headers including:",
                 Object.keys(httpHeaders).filter((k) => k.startsWith("x-")),
               );
-              console.log("🔍 Full headers object:", httpHeaders);
+              this.#logger.debug("Full headers object:", httpHeaders);
             }
 
             // In stateless mode, create a new session for each request
@@ -2398,13 +2401,13 @@ export class FastMCP<
                   httpHeaders[key.toLowerCase()] = value.join(", ");
                 }
               }
-              console.log(
-                "🔍 Persistent session creation - captured headers:",
+              this.#logger.debug(
+                "Persistent session creation - captured headers:",
                 Object.keys(httpHeaders).length,
                 "headers including:",
                 Object.keys(httpHeaders).filter((k) => k.startsWith("x-")),
               );
-              console.log("🔍 Full headers object:", httpHeaders);
+              this.#logger.debug("Full headers object:", httpHeaders);
             }
 
             return this.#createSession(auth, httpHeaders);
