@@ -1,6 +1,6 @@
 {
   "name": "@ellavox-ai/fastmcp",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "main": "dist/FastMCP.js",
   "scripts": {
     "build": "tsup",
