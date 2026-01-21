@@ -309,8 +309,6 @@ describe("FastMCP SessionStore Integration", () => {
 
   describe("sync debouncing", () => {
     it("should debounce rapid sync calls within the same session", async () => {
-      const updateSpy = vi.spyOn(sessionStore, "update");
-
       server = new FastMCP<TestAuth>({
         authenticate: async () => ({ role: "admin", userId: "test" }),
         name: "test-server",
@@ -324,40 +322,18 @@ describe("FastMCP SessionStore Integration", () => {
 
       const session = server.sessions[0];
 
-      // Simulate rapid state changes that would trigger syncs
-      // We can't directly call #syncToStore(), but we can trigger events that cause syncs
-      // Instead, let's verify that after rapid state changes, only one update happens after debounce
+      // The debouncing happens internally, so we verify the mechanism exists
+      // by checking that the session properly manages its state
+      expect(session.sessionId).toBeDefined();
 
-      // Wait for initial sync to complete
+      // Wait for any debounced syncs to complete
       await delay(100);
 
-      // Clear previous calls
-      updateSpy.mockClear();
-
-      // Trigger multiple state changes rapidly by simulating connection events
-      // Since we can't directly access #syncToStore(), we'll verify behavior through
-      // the session store update calls
-
-      // The debouncing happens internally, so we verify that rapid operations
-      // result in fewer updates than operations
-      const initialUpdateCount = updateSpy.mock.calls.length;
-
-      // Wait for debounce delay
-      await delay(60);
-
-      // After debounce delay, there should be at most one update
-      // (or zero if no state actually changed)
-      const finalUpdateCount = updateSpy.mock.calls.length;
-      
-      // The key test: rapid syncs should be debounced
-      // Since we can't directly trigger syncs, we verify the mechanism exists
-      // by checking that the session properly manages its state
+      // Session should still be valid
       expect(session.sessionId).toBeDefined();
     });
 
     it("should not interfere with syncs from different sessions", async () => {
-      const updateSpy = vi.spyOn(sessionStore, "update");
-
       // Create first server/session
       const server1 = new FastMCP<TestAuth>({
         authenticate: async () => ({ role: "admin", userId: "user1" }),
@@ -416,7 +392,6 @@ describe("FastMCP SessionStore Integration", () => {
       // Get initial state
       const initialSession = await sessionStore.get(sessionId);
       expect(initialSession).not.toBeNull();
-      const initialState = initialSession!.connectionState;
 
       // The session should eventually sync its final state
       // Since we can't directly trigger rapid syncs, we verify the mechanism

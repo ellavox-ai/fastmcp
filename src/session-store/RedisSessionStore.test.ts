@@ -437,9 +437,9 @@ describe("RedisSessionStore", () => {
       const errorClient = createMockRedisClient();
       errorClient.pipeline = vi.fn().mockImplementation(() => {
         const pipe = createMockPipeline();
-        pipe.exec = vi.fn().mockRejectedValue(
-          new Error("Redis connection failed"),
-        );
+        pipe.exec = vi
+          .fn()
+          .mockRejectedValue(new Error("Redis connection failed"));
         return pipe;
       });
 
@@ -448,18 +448,18 @@ describe("RedisSessionStore", () => {
         redis: {},
       });
 
-      await expect(
-        errorStore.create(createTestSessionData()),
-      ).rejects.toThrow("Failed to create session in Redis");
+      await expect(errorStore.create(createTestSessionData())).rejects.toThrow(
+        "Failed to create session in Redis",
+      );
     });
 
     it("should return false when pipeline.exec() fails in delete()", async () => {
       const errorClient = createMockRedisClient();
       errorClient.pipeline = vi.fn().mockImplementation(() => {
         const pipe = createMockPipeline();
-        pipe.exec = vi.fn().mockRejectedValue(
-          new Error("Redis connection failed"),
-        );
+        pipe.exec = vi
+          .fn()
+          .mockRejectedValue(new Error("Redis connection failed"));
         return pipe;
       });
 

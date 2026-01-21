@@ -173,7 +173,7 @@ export class RedisSessionStore<T = Record<string, unknown>>
     try {
       const results = await pipeline.exec();
       return results?.[0]?.[1] === 1;
-    } catch (error) {
+    } catch {
       // Log error and return false - deletion failure is non-critical
       return false;
     }

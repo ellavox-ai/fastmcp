@@ -1065,7 +1065,6 @@ export class FastMCPSession<
   #server: Server;
   #sessionId: string;
   #sessionStore?: SessionStore<T>;
-  #syncPending: boolean = false;
   #syncTimeout: null | ReturnType<typeof setTimeout> = null;
   #toolFilter?: ToolFilterFunction;
 
@@ -1178,13 +1177,13 @@ export class FastMCPSession<
 
   public async close() {
     this.#connectionState = "closed";
-    
+
     // Clear any pending sync timeout
     if (this.#syncTimeout) {
       clearTimeout(this.#syncTimeout);
       this.#syncTimeout = null;
     }
-    
+
     // Sync final state immediately (no debouncing on close)
     if (this.#sessionStore) {
       this.#sessionStore
@@ -1463,28 +1462,22 @@ export class FastMCPSession<
       clearTimeout(this.#syncTimeout);
     }
 
-    // Mark that we have a pending sync for this session
-    this.#syncPending = true;
-
     // Debounce: execute after 50ms of no new sync requests for THIS session
     this.#syncTimeout = setTimeout(() => {
-      this.#syncPending = false;
       this.#syncTimeout = null;
 
       // Capture current state at execution time (last write wins)
-      this.#sessionStore!
-        .update(this.#sessionId, {
-          clientCapabilities: this.#clientCapabilities ?? null,
-          connectionState: this.#connectionState,
-          loggingLevel: this.#loggingLevel,
-          roots: this.#roots,
-        })
-        .catch((err) => {
-          this.#logger.debug(
-            "[FastMCP debug] Failed to sync session to store:",
-            err,
-          );
-        });
+      this.#sessionStore!.update(this.#sessionId, {
+        clientCapabilities: this.#clientCapabilities ?? null,
+        connectionState: this.#connectionState,
+        loggingLevel: this.#loggingLevel,
+        roots: this.#roots,
+      }).catch((err) => {
+        this.#logger.debug(
+          "[FastMCP debug] Failed to sync session to store:",
+          err,
+        );
+      });
     }, 50);
   }
 
