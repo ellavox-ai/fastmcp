@@ -7,7 +7,7 @@ import {
   CallToolRequestSchema,
   ClientCapabilities,
   CompleteRequestSchema,
-  CreateMessageRequestSchema,
+  CreateMessageRequestParams,
   ErrorCode,
   GetPromptRequestSchema,
   GetPromptResult,
@@ -26,6 +26,7 @@ import {
   SetLevelRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { StandardSchemaV1 } from "@standard-schema/spec";
+import { randomUUID } from "crypto";
 import { EventEmitter } from "events";
 import { readFile } from "fs/promises";
 import Fuse from "fuse.js";
@@ -37,6 +38,11 @@ import { fetch } from "undici";
 import parseURITemplate from "uri-templates";
 import { toJsonSchema } from "xsschema";
 import { z } from "zod";
+
+import type {
+  RedisConnectionOptions,
+  SessionStore,
+} from "./session-store/index.js";
 
 export interface FilterableTool {
   /** Optional tool annotations */
@@ -863,6 +869,48 @@ type ServerOptions<T extends FastMCPSessionAuth> = {
     enabled?: boolean;
   };
   /**
+   * Optional session storage for horizontal scaling.
+   * When not provided, uses in-memory storage (single-instance only).
+   *
+   * @example
+   * ```typescript
+   * // Using Redis for horizontal scaling
+   * const server = new FastMCP({
+   *   name: "my-server",
+   *   version: "1.0.0",
+   *   sessionStore: {
+   *     type: "redis",
+   *     redis: "redis://localhost:6379",
+   *     ttlMs: 3600000,
+   *   },
+   * });
+   * ```
+   */
+  sessionStore?: {
+    /**
+     * Key prefix for Redis storage.
+     * @default "fastmcp:session:"
+     */
+    keyPrefix?: string;
+    /**
+     * Redis connection options (required when type is "redis").
+     * Can be a connection URL string or ioredis options object.
+     */
+    redis?: RedisConnectionOptions | string;
+    /**
+     * Time-to-live for sessions in milliseconds.
+     * @default 3600000 (1 hour)
+     */
+    ttlMs?: number;
+    /**
+     * The storage backend to use.
+     * - "memory": In-memory storage (default, single instance only)
+     * - "redis": Redis-based storage for horizontal scaling
+     * - SessionStore: Custom implementation
+     */
+    type: "memory" | "redis" | SessionStore<T>;
+  };
+  /**
    * Optional tool filter function for dynamic tool provisioning.
    * Called during tools/list requests to filter available tools based on request context.
    *
@@ -989,6 +1037,9 @@ export class FastMCPSession<
   public get server(): Server {
     return this.#server;
   }
+  public get sessionId(): string {
+    return this.#sessionId;
+  }
   #auth: T | undefined;
   #capabilities: ServerCapabilities = {};
   #clientCapabilities?: ClientCapabilities;
@@ -1012,6 +1063,9 @@ export class FastMCPSession<
   #rootsConfig?: ServerOptions<T>["roots"];
 
   #server: Server;
+  #sessionId: string;
+  #sessionStore?: SessionStore<T>;
+  #syncTimeout: null | ReturnType<typeof setTimeout> = null;
   #toolFilter?: ToolFilterFunction;
 
   #utils?: ServerOptions<T>["utils"];
@@ -1027,6 +1081,8 @@ export class FastMCPSession<
     resources,
     resourcesTemplates,
     roots,
+    sessionId,
+    sessionStore,
     toolFilter,
     tools,
     transportType,
@@ -1043,6 +1099,8 @@ export class FastMCPSession<
     resources: Resource<T>[];
     resourcesTemplates: InputResourceTemplate<T>[];
     roots?: ServerOptions<T>["roots"];
+    sessionId: string;
+    sessionStore?: SessionStore<T>;
     toolFilter?: ToolFilterFunction;
     tools: Tool<T>[];
     transportType?: "httpStream" | "stdio";
@@ -1056,6 +1114,8 @@ export class FastMCPSession<
     this.#logger = logger;
     this.#pingConfig = ping;
     this.#rootsConfig = roots;
+    this.#sessionId = sessionId;
+    this.#sessionStore = sessionStore;
     this.#toolFilter = toolFilter;
     this.#needsEventLoopFlush = transportType === "httpStream";
 
@@ -1076,6 +1136,7 @@ export class FastMCPSession<
     }
 
     this.#capabilities.logging = {};
+    this.#capabilities.completions = {};
 
     this.#server = new Server(
       { name: name, version: version },
@@ -1116,6 +1177,29 @@ export class FastMCPSession<
 
   public async close() {
     this.#connectionState = "closed";
+
+    // Clear any pending sync timeout
+    if (this.#syncTimeout) {
+      clearTimeout(this.#syncTimeout);
+      this.#syncTimeout = null;
+    }
+
+    // Sync final state immediately (no debouncing on close)
+    if (this.#sessionStore) {
+      this.#sessionStore
+        .update(this.#sessionId, {
+          clientCapabilities: this.#clientCapabilities ?? null,
+          connectionState: this.#connectionState,
+          loggingLevel: this.#loggingLevel,
+          roots: this.#roots,
+        })
+        .catch((err) => {
+          this.#logger.debug(
+            "[FastMCP debug] Failed to sync session to store on close:",
+            err,
+          );
+        });
+    }
 
     if (this.#pingInterval) {
       clearInterval(this.#pingInterval);
@@ -1214,9 +1298,11 @@ export class FastMCPSession<
 
       // Mark connection as ready and emit event
       this.#connectionState = "ready";
+      this.#syncToStore();
       this.emit("ready");
     } catch (error) {
       this.#connectionState = "error";
+      this.#syncToStore();
       const errorEvent = {
         error: error instanceof Error ? error : new Error(String(error)),
       };
@@ -1298,7 +1384,7 @@ export class FastMCPSession<
   }
 
   public async requestSampling(
-    message: z.infer<typeof CreateMessageRequestSchema>["params"],
+    message: CreateMessageRequestParams,
     options?: RequestOptions,
   ): Promise<SamplingResponse> {
     return this.#server.createMessage(message, options);
@@ -1361,6 +1447,50 @@ export class FastMCPSession<
       intervalMs: pingConfig.intervalMs || 5000,
       logLevel: pingConfig.logLevel || "debug",
     };
+  }
+
+  /**
+   * Syncs the current session state to the session store.
+   * Fire-and-forget - errors are logged but don't interrupt operation.
+   * Uses debouncing to prevent concurrent syncs within the same session.
+   */
+  #syncToStore(): void {
+    if (!this.#sessionStore) return;
+
+    // Clear any existing timeout for this session
+    if (this.#syncTimeout) {
+      clearTimeout(this.#syncTimeout);
+    }
+
+    // Debounce: execute after 50ms of no new sync requests for THIS session
+    this.#syncTimeout = setTimeout(() => {
+      this.#syncTimeout = null;
+
+      // Capture current state at execution time (last write wins)
+      this.#sessionStore!.update(this.#sessionId, {
+        clientCapabilities: this.#clientCapabilities ?? null,
+        connectionState: this.#connectionState,
+        loggingLevel: this.#loggingLevel,
+        roots: this.#roots,
+      }).catch((err) => {
+        this.#logger.debug(
+          "[FastMCP debug] Failed to sync session to store:",
+          err,
+        );
+      });
+    }, 50);
+  }
+
+  /**
+   * Touches the session in the store to refresh TTL.
+   * Fire-and-forget - errors are silently ignored.
+   */
+  #touchStore(): void {
+    if (!this.#sessionStore) return;
+
+    this.#sessionStore.touch(this.#sessionId).catch(() => {
+      // Silently ignore touch errors
+    });
   }
 
   private addPrompt(inputPrompt: InputPrompt<T>) {
@@ -1438,10 +1568,9 @@ export class FastMCPSession<
 
   private setupCompleteHandlers() {
     this.#server.setRequestHandler(CompleteRequestSchema, async (request) => {
-      if (request.params.ref.type === "ref/prompt") {
-        const prompt = this.#prompts.find(
-          (prompt) => prompt.name === request.params.ref.name,
-        );
+      const ref = request.params.ref;
+      if (ref.type === "ref/prompt") {
+        const prompt = this.#prompts.find((prompt) => prompt.name === ref.name);
 
         if (!prompt) {
           throw new UnexpectedStateError("Unknown prompt", {
@@ -1468,9 +1597,9 @@ export class FastMCPSession<
         };
       }
 
-      if (request.params.ref.type === "ref/resource") {
+      if (ref.type === "ref/resource") {
         const resource = this.#resourceTemplates.find(
-          (resource) => resource.uriTemplate === request.params.ref.uri,
+          (resource) => resource.uriTemplate === ref.uri,
         );
 
         if (!resource) {
@@ -1520,6 +1649,7 @@ export class FastMCPSession<
   private setupLoggingHandlers() {
     this.#server.setRequestHandler(SetLevelRequestSchema, (request) => {
       this.#loggingLevel = request.params.level;
+      this.#syncToStore();
 
       return {};
     });
@@ -1540,6 +1670,9 @@ export class FastMCPSession<
     });
 
     this.#server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+      // Touch session to refresh TTL on activity
+      this.#touchStore();
+
       const prompt = prompts.find(
         (prompt) => prompt.name === request.params.name,
       );
@@ -1614,6 +1747,9 @@ export class FastMCPSession<
     this.#server.setRequestHandler(
       ReadResourceRequestSchema,
       async (request) => {
+        // Touch session to refresh TTL on activity
+        this.#touchStore();
+
         if ("uri" in request.params) {
           const resource = resources.find(
             (resource) =>
@@ -1732,6 +1868,7 @@ export class FastMCPSession<
             .listRoots()
             .then((roots) => {
               this.#roots = roots.roots;
+              this.#syncToStore();
 
               this.emit("rootsChanged", {
                 roots: roots.roots,
@@ -1840,6 +1977,9 @@ export class FastMCPSession<
     this.#server.setRequestHandler(
       CallToolRequestSchema,
       async (request, extra) => {
+        // Touch session to refresh TTL on activity
+        this.#touchStore();
+
         // Headers are available from current request via extra.requestInfo.headers
         // with fallback to session headers captured during creation
         const currentHeaders = this.getCurrentHeaders(extra);
@@ -2101,6 +2241,13 @@ export class FastMCP<
   public get sessions(): FastMCPSession<T>[] {
     return this.#sessions;
   }
+  /**
+   * Get the configured session store, if any.
+   * Returns null if no session store is configured.
+   */
+  public get sessionStore(): null | SessionStore<T> {
+    return this.#sessionStore;
+  }
   #authenticate: Authenticate<T> | undefined;
   #httpStreamServer: null | SSEServer = null;
   #logger: Logger;
@@ -2109,6 +2256,9 @@ export class FastMCP<
   #resources: Resource<T>[] = [];
   #resourcesTemplates: InputResourceTemplate<T>[] = [];
   #sessions: FastMCPSession<T>[] = [];
+  #sessionStore: null | SessionStore<T> = null;
+  #sessionStoreInitialized: boolean = false;
+
   #toolFilter?: ToolFilterFunction;
 
   #tools: Tool<T>[] = [];
@@ -2252,6 +2402,9 @@ export class FastMCP<
       transportType: "httpStream" | "stdio";
     }>,
   ) {
+    // Initialize session store if configured
+    await this.#initializeSessionStore();
+
     const config = this.#parseRuntimeConfig(options);
 
     if (config.transportType === "stdio") {
@@ -2275,6 +2428,23 @@ export class FastMCP<
         }
       }
 
+      // Generate sessionId - use SessionStore if available, otherwise generate locally
+      let sessionId: string;
+
+      if (this.#sessionStore) {
+        // Create session in store and get the generated ID
+        sessionId = await this.#sessionStore.create({
+          auth,
+          clientCapabilities: null,
+          connectionState: "connecting",
+          httpHeaders: undefined,
+          loggingLevel: "info",
+          roots: [],
+        });
+      } else {
+        sessionId = randomUUID();
+      }
+
       const session = new FastMCPSession<T>({
         auth,
         httpHeaders: undefined, // No HTTP headers for stdio transport
@@ -2286,6 +2456,8 @@ export class FastMCP<
         resources: this.#resources,
         resourcesTemplates: this.#resourcesTemplates,
         roots: this.#options.roots,
+        sessionId,
+        sessionStore: this.#sessionStore ?? undefined,
         toolFilter: this.#toolFilter,
         tools: this.#tools,
         transportType: "stdio",
@@ -2359,14 +2531,24 @@ export class FastMCP<
 
             // In stateless mode, create a new session for each request
             // without persisting it in the sessions array
-            return this.#createSession(auth, httpHeaders);
+            return await this.#createSession(auth, httpHeaders);
           },
           enableJsonResponse: httpConfig.enableJsonResponse,
           eventStore: httpConfig.eventStore,
           host: httpConfig.host,
-          // In stateless mode, we don't track sessions
-          onClose: async () => {
-            // No session tracking in stateless mode
+          // In stateless mode, we don't track sessions in memory
+          // but we still need to clean up from session store
+          onClose: async (session) => {
+            if (this.#sessionStore) {
+              await this.#sessionStore
+                .delete(session.sessionId)
+                .catch((err) => {
+                  this.#logger.error(
+                    "[FastMCP error] Failed to delete stateless session from store:",
+                    err,
+                  );
+                });
+            }
           },
           onConnect: async () => {
             // No persistent session tracking in stateless mode
@@ -2410,7 +2592,7 @@ export class FastMCP<
               this.#logger.debug("Full headers object:", httpHeaders);
             }
 
-            return this.#createSession(auth, httpHeaders);
+            return await this.#createSession(auth, httpHeaders);
           },
           enableJsonResponse: httpConfig.enableJsonResponse,
           eventStore: httpConfig.eventStore,
@@ -2419,6 +2601,18 @@ export class FastMCP<
             const sessionIndex = this.#sessions.indexOf(session);
 
             if (sessionIndex !== -1) this.#sessions.splice(sessionIndex, 1);
+
+            // Clean up from session store
+            if (this.#sessionStore) {
+              await this.#sessionStore
+                .delete(session.sessionId)
+                .catch((err) => {
+                  this.#logger.error(
+                    "[FastMCP error] Failed to delete session from store:",
+                    err,
+                  );
+                });
+            }
 
             this.emit("disconnect", {
               session: session as FastMCPSession<FastMCPSessionAuth>,
@@ -2456,27 +2650,53 @@ export class FastMCP<
   }
 
   /**
-   * Stops the server.
+   * Stops the server and releases all resources.
    */
   public async stop() {
     if (this.#httpStreamServer) {
       await this.#httpStreamServer.close();
+    }
+
+    // Close the session store to release resources
+    if (this.#sessionStore) {
+      await this.#sessionStore.close();
+      this.#sessionStore = null;
+      this.#sessionStoreInitialized = false;
     }
   }
 
   /**
    * Creates a new FastMCPSession instance with the current configuration.
    * Used both for regular sessions and stateless requests.
+   * When a SessionStore is configured, the session metadata is persisted.
    */
-  #createSession(
+  async #createSession(
     auth?: T,
     httpHeaders?: Record<string, string>,
-  ): FastMCPSession<T> {
+  ): Promise<FastMCPSession<T>> {
+    // Generate sessionId - use SessionStore if available, otherwise generate locally
+    let sessionId: string;
+
+    if (this.#sessionStore) {
+      // Create session in store and get the generated ID
+      sessionId = await this.#sessionStore.create({
+        auth,
+        clientCapabilities: null,
+        connectionState: "connecting",
+        httpHeaders,
+        loggingLevel: "info",
+        roots: [],
+      });
+    } else {
+      sessionId = randomUUID();
+    }
+
     const allowedTools = auth
       ? this.#tools.filter((tool) =>
           tool.canAccess ? tool.canAccess(auth) : true,
         )
       : this.#tools;
+
     return new FastMCPSession<T>({
       auth,
       httpHeaders,
@@ -2488,6 +2708,8 @@ export class FastMCP<
       resources: this.#resources,
       resourcesTemplates: this.#resourcesTemplates,
       roots: this.#options.roots,
+      sessionId,
+      sessionStore: this.#sessionStore ?? undefined,
       toolFilter: this.#toolFilter,
       tools: allowedTools,
       transportType: "httpStream",
@@ -2613,6 +2835,52 @@ export class FastMCP<
     res.writeHead(404).end();
   };
 
+  /**
+   * Initialize the session store if configured.
+   * Called automatically during server start.
+   */
+  async #initializeSessionStore(): Promise<void> {
+    if (this.#sessionStoreInitialized) {
+      return;
+    }
+    this.#sessionStoreInitialized = true;
+
+    const config = this.#options.sessionStore;
+    if (!config) {
+      return;
+    }
+
+    if (typeof config.type === "object") {
+      // Custom SessionStore implementation provided directly
+      this.#sessionStore = config.type;
+      this.#logger.debug("[FastMCP] Using custom session store");
+    } else if (config.type === "redis") {
+      if (!config.redis) {
+        throw new Error(
+          "Redis configuration required when sessionStore.type is 'redis'",
+        );
+      }
+      // Lazy import to keep ioredis optional
+      const { RedisSessionStore } = await import(
+        "./session-store/RedisSessionStore.js"
+      );
+      this.#sessionStore = new RedisSessionStore<T>({
+        keyPrefix: config.keyPrefix,
+        redis: config.redis,
+        ttlMs: config.ttlMs,
+      });
+      this.#logger.info("[FastMCP] Redis session store initialized");
+    } else if (config.type === "memory") {
+      const { MemorySessionStore } = await import(
+        "./session-store/MemorySessionStore.js"
+      );
+      this.#sessionStore = new MemorySessionStore<T>({
+        ttlMs: config.ttlMs,
+      });
+      this.#logger.debug("[FastMCP] Memory session store initialized");
+    }
+  }
+
   #parseRuntimeConfig(
     overrides?: Partial<{
       httpStream: {
@@ -2700,6 +2968,17 @@ export class FastMCP<
 
     if (sessionIndex !== -1) {
       this.#sessions.splice(sessionIndex, 1);
+
+      // Clean up from session store
+      if (this.#sessionStore) {
+        this.#sessionStore.delete(session.sessionId).catch((err) => {
+          this.#logger.error(
+            "[FastMCP error] Failed to delete session from store:",
+            err,
+          );
+        });
+      }
+
       this.emit("disconnect", {
         session: session as FastMCPSession<FastMCPSessionAuth>,
       });
@@ -2733,3 +3012,17 @@ export type {
   Tool,
   ToolParameters,
 };
+
+// Re-export session store types and implementations
+export type {
+  RedisClient,
+  RedisConnectionOptions,
+  RedisPipeline,
+  RedisSessionStoreOptions,
+  SerializableSessionData,
+  SessionStore,
+  SessionStoreOptions,
+} from "./session-store/index.js";
+
+export { MemorySessionStore } from "./session-store/MemorySessionStore.js";
+export { RedisSessionStore } from "./session-store/RedisSessionStore.js";
