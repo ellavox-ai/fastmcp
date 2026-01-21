@@ -743,23 +743,29 @@ test("sends logging messages to the client", async () => {
         name: "add",
       });
 
-      expect(onLog).toHaveBeenCalledTimes(4);
-      expect(onLog).toHaveBeenNthCalledWith(1, {
+      // Note: SDK 1.25+ emits an additional "SSE Connection established" log message
+      // Filter to get only our application log messages (those with a "message" property)
+      const appLogs = onLog.mock.calls
+        .map((call) => call[0])
+        .filter((log) => log.message !== undefined);
+
+      expect(appLogs).toHaveLength(4);
+      expect(appLogs[0]).toEqual({
         context: {
           foo: "bar",
         },
         level: "debug",
         message: "debug message",
       });
-      expect(onLog).toHaveBeenNthCalledWith(2, {
+      expect(appLogs[1]).toEqual({
         level: "error",
         message: "error message",
       });
-      expect(onLog).toHaveBeenNthCalledWith(3, {
+      expect(appLogs[2]).toEqual({
         level: "info",
         message: "info message",
       });
-      expect(onLog).toHaveBeenNthCalledWith(4, {
+      expect(appLogs[3]).toEqual({
         level: "warning",
         message: "warn message",
       });
@@ -840,7 +846,6 @@ test("clients reads a resource", async () => {
         contents: [
           {
             mimeType: "text/plain",
-            name: "Application Logs",
             text: "Example log content",
             uri: "file:///logs/app.log",
           },
@@ -880,13 +885,11 @@ test("clients reads a resource that returns multiple resources", async () => {
         contents: [
           {
             mimeType: "text/plain",
-            name: "Application Logs",
             text: "a",
             uri: "file:///logs/app.log",
           },
           {
             mimeType: "text/plain",
-            name: "Application Logs",
             text: "b",
             uri: "file:///logs/app.log",
           },
@@ -1722,7 +1725,6 @@ test("clients reads a resource accessed via a resource template", async () => {
         contents: [
           {
             mimeType: "text/plain",
-            name: "Application Logs",
             text: "Example log content",
             uri: "file:///logs/app.log",
           },
@@ -2177,6 +2179,7 @@ test("provides auth to tools", async () => {
     },
     {
       client: expect.any(Object),
+      headers: expect.any(Object),
       log: {
         debug: expect.any(Function),
         error: expect.any(Function),
@@ -2269,7 +2272,6 @@ test("provides auth to resources", async () => {
     contents: [
       {
         mimeType: "text/plain",
-        name: "Auth Resource",
         text: "User 42 with role admin loaded this resource",
         uri: "auth://resource",
       },
@@ -2362,7 +2364,6 @@ test("provides auth to resource templates", async () => {
     contents: [
       {
         mimeType: "text/plain",
-        name: "Auth Template",
         text: "Resource resource-123 accessed by user 99 with permissions: read, write",
         uri: "auth://template/resource-123",
       },
@@ -2460,13 +2461,11 @@ test("provides auth to resource templates returning arrays", async () => {
     contents: [
       {
         mimeType: "text/plain",
-        name: "Multi Doc Template",
         text: "Document 1 for reports - Team: team-alpha",
         uri: "docs://category/reports",
       },
       {
         mimeType: "text/plain",
-        name: "Multi Doc Template",
         text: "Document 2 for reports - Access Level: 3",
         uri: "docs://category/reports",
       },
