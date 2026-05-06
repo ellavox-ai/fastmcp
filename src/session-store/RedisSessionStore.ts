@@ -95,9 +95,9 @@ export interface RedisSessionStoreOptions extends SessionStoreOptions {
  * });
  * ```
  */
-export class RedisSessionStore<T = Record<string, unknown>>
-  implements SessionStore<T>
-{
+export class RedisSessionStore<
+  T = Record<string, unknown>,
+> implements SessionStore<T> {
   readonly #keyPrefix: string;
   readonly #options: RedisSessionStoreOptions;
   readonly #ownsClient: boolean;

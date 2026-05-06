@@ -459,8 +459,8 @@ type InputPromptArgument<T extends FastMCPSessionAuth = FastMCPSessionAuth> =
 
 type InputResourceTemplate<
   T extends FastMCPSessionAuth,
-  Arguments extends
-    InputResourceTemplateArgument<T>[] = InputResourceTemplateArgument<T>[],
+  Arguments extends InputResourceTemplateArgument<T>[] =
+    InputResourceTemplateArgument<T>[],
 > = {
   arguments: Arguments;
   description?: string;
@@ -548,8 +548,8 @@ type ResourceResult =
 
 type ResourceTemplate<
   T extends FastMCPSessionAuth,
-  Arguments extends
-    ResourceTemplateArgument<T>[] = ResourceTemplateArgument<T>[],
+  Arguments extends ResourceTemplateArgument<T>[] =
+    ResourceTemplateArgument<T>[],
 > = {
   arguments: Arguments;
   complete?: (name: string, value: string, auth?: T) => Promise<Completion>;
@@ -2861,9 +2861,8 @@ export class FastMCP<
         );
       }
       // Lazy import to keep ioredis optional
-      const { RedisSessionStore } = await import(
-        "./session-store/RedisSessionStore.js"
-      );
+      const { RedisSessionStore } =
+        await import("./session-store/RedisSessionStore.js");
       this.#sessionStore = new RedisSessionStore<T>({
         keyPrefix: config.keyPrefix,
         redis: config.redis,
@@ -2871,9 +2870,8 @@ export class FastMCP<
       });
       this.#logger.info("[FastMCP] Redis session store initialized");
     } else if (config.type === "memory") {
-      const { MemorySessionStore } = await import(
-        "./session-store/MemorySessionStore.js"
-      );
+      const { MemorySessionStore } =
+        await import("./session-store/MemorySessionStore.js");
       this.#sessionStore = new MemorySessionStore<T>({
         ttlMs: config.ttlMs,
       });

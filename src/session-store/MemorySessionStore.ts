@@ -11,9 +11,9 @@ import type {
  * Suitable for single-instance deployments or development.
  * Sessions are lost when the process restarts.
  */
-export class MemorySessionStore<T = Record<string, unknown>>
-  implements SessionStore<T>
-{
+export class MemorySessionStore<
+  T = Record<string, unknown>,
+> implements SessionStore<T> {
   #cleanupInterval: null | ReturnType<typeof setInterval> = null;
   readonly #sessions: Map<string, SerializableSessionData<T>> = new Map();
   readonly #ttlMs: number;
